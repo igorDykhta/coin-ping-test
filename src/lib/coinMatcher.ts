@@ -44,8 +44,24 @@ function peakMatches(
 }
 
 /**
+ * If any peaks are annotated as "long", return only those — they're far more
+ * reliable than transient "short" peaks. Falls back to all peaks when nothing
+ * is annotated (e.g. references saved before peak kind tracking existed).
+ */
+function preferLongPeaks(
+  peaks: readonly ResonancePeak[],
+): readonly ResonancePeak[] {
+  const longs = peaks.filter((p) => p.kind === "long");
+  return longs.length > 0 ? longs : peaks;
+}
+
+/**
  * Score every reference against the detected peaks and return the matches
  * with score >= `minScore`, sorted by score (then by tightness of fit).
+ *
+ * Long peaks are preferred on both sides of the comparison; short peaks are
+ * ignored when long peaks are available, since short peaks are often
+ * mechanical transients that don't faithfully represent the coin's resonance.
  */
 export function findMatchingReferences(
   pingPeaks: readonly ResonancePeak[],
@@ -55,21 +71,24 @@ export function findMatchingReferences(
   const minScore = options?.minScore ?? DEFAULT_MIN_SCORE;
   if (pingPeaks.length === 0) return [];
 
+  const candidatePeaks = preferLongPeaks(pingPeaks);
+
   const results: ReferenceMatch[] = [];
   for (const reference of references) {
-    if (reference.peaks.length === 0) continue;
+    const referencePeaks = preferLongPeaks(reference.peaks);
+    if (referencePeaks.length === 0) continue;
 
     let matched = 0;
     let totalError = 0;
-    for (const refPeak of reference.peaks) {
-      const m = peakMatches(pingPeaks, refPeak);
+    for (const refPeak of referencePeaks) {
+      const m = peakMatches(candidatePeaks, refPeak);
       if (m.matched) {
         matched += 1;
         totalError += m.errorHz;
       }
     }
 
-    const score = matched / reference.peaks.length;
+    const score = matched / referencePeaks.length;
     if (score < minScore) continue;
 
     results.push({

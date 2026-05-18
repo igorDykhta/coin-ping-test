@@ -131,10 +131,7 @@ function DetectedPingItem({
   const canSave =
     typeof window !== "undefined" && typeof window.coinPingApi !== "undefined";
 
-  const peaksText = ping.peaks
-    .slice(0, 4)
-    .map((p) => `${Math.round(p.frequencyHz)} Hz (${p.magnitude.toFixed(1)} dB)`)
-    .join(" · ");
+  const peaksToShow = ping.peaks.slice(0, 4);
 
   const matches = useMemo(
     () => findMatchingReferences(ping.peaks, references),
@@ -161,7 +158,22 @@ function DetectedPingItem({
               {ping.ambientSubtracted ? " · ambient-subtracted" : ""}
             </span>
           </div>
-          <div className="mt-1 break-words text-muted-foreground">{peaksText}</div>
+          <div className="mt-1 flex flex-wrap items-center gap-x-2 gap-y-0.5 text-muted-foreground">
+            {peaksToShow.map((p, idx) => (
+              <span key={idx} className="font-mono">
+                {Math.round(p.frequencyHz)} Hz · {p.magnitude.toFixed(1)} dB
+                {p.kind === "short" ? (
+                  <span className="ml-1 rounded-sm bg-amber-500/20 px-1 text-[10px] text-amber-300">
+                    short
+                  </span>
+                ) : p.kind === "long" ? (
+                  <span className="ml-1 rounded-sm bg-emerald-500/20 px-1 text-[10px] text-emerald-300">
+                    long
+                  </span>
+                ) : null}
+              </span>
+            ))}
+          </div>
 
           {hasMatch ? <MatchBanner matches={matches} /> : null}
         </div>
@@ -335,6 +347,15 @@ function SavePingDialog({ ping, onClose, onSaved }: SavePingDialogProps) {
                 {ping.peaks.map((p, idx) => (
                   <li key={idx} className="font-mono">
                     {Math.round(p.frequencyHz)} Hz ({p.magnitude.toFixed(1)} dB)
+                    {p.kind === "short" ? (
+                      <span className="ml-2 rounded-sm bg-amber-500/20 px-1 text-[10px] text-amber-300">
+                        short
+                      </span>
+                    ) : p.kind === "long" ? (
+                      <span className="ml-2 rounded-sm bg-emerald-500/20 px-1 text-[10px] text-emerald-300">
+                        long
+                      </span>
+                    ) : null}
                   </li>
                 ))}
               </ul>

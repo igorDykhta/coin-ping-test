@@ -38,13 +38,17 @@ export function LiveSpectrumPanel({
 }: LiveSpectrumPanelProps = {}) {
   const [desiredFftSize, setDesiredFftSize] = useState<number>(FFT_SIZE);
   const [pingDetectionEnabled, setPingDetectionEnabled] = useState<boolean>(true);
+  const [allowLowFreqDetection, setAllowLowFreqDetection] = useState<boolean>(false);
   const [sampleRate, setSampleRate] = useState<number | null>(null);
 
   const { minHz, maxHz, setRange, resetRange } = useFrequencyRange(sampleRate);
 
-  // Detection ignores everything below ~4 kHz so keyboard/touchpad/mouse
-  // mechanical noise (which is mostly low-frequency) doesn't fire spurious pings.
-  const detectionMinHz = Math.max(minHz, PING_DETECTION_MIN_HZ);
+  // By default, detection ignores everything below ~4 kHz so keyboard/touchpad
+  // /mouse mechanical noise (mostly low-frequency) doesn't fire spurious pings.
+  // The user can opt in to low-frequency detection via the toggle.
+  const detectionMinHz = allowLowFreqDetection
+    ? minHz
+    : Math.max(minHz, PING_DETECTION_MIN_HZ);
   const detectionMaxHz = maxHz;
   const detectionBandValid = detectionMaxHz > detectionMinHz;
 
@@ -194,10 +198,24 @@ export function LiveSpectrumPanel({
                 title={
                   detectionBandValid
                     ? `Auto-detect transient spikes (band: ${Math.round(detectionMinHz)}–${Math.round(detectionMaxHz)} Hz)`
-                    : `Zoom in above ${PING_DETECTION_MIN_HZ} Hz to enable auto-detect`
+                    : allowLowFreqDetection
+                      ? "Visible band is empty — adjust zoom."
+                      : `Zoom in above ${PING_DETECTION_MIN_HZ} Hz, or enable low-freq detection`
                 }
               >
                 Auto-detect: {pingDetectionEnabled ? "on" : "off"}
+              </Button>
+              <Button
+                type="button"
+                variant={allowLowFreqDetection ? "destructive" : "outline"}
+                onClick={() => setAllowLowFreqDetection((prev) => !prev)}
+                title={
+                  allowLowFreqDetection
+                    ? "Detection floor is the visible band's min — keyboard/touchpad noise can trigger pings"
+                    : `Detection floor is ${PING_DETECTION_MIN_HZ} Hz (filters low-frequency mechanical noise)`
+                }
+              >
+                Low-freq: {allowLowFreqDetection ? "on" : "off"}
               </Button>
               {!isRecording ? (
                 <Button

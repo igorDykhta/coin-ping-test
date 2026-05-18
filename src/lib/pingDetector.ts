@@ -53,6 +53,18 @@ const DEFAULT_MIN_TRIGGER_BAND_DB = -85;
 const DEFAULT_MIN_SUSTAIN_MS = 100;
 const DEFAULT_SUSTAIN_DROP_DB = 8;
 
+/** Sustain (ms) at which a peak is upgraded from "short" to "long". */
+const LONG_PEAK_SUSTAIN_MS = 200;
+/**
+ * dB bonus added to a long peak's magnitude when ranking peaks. A long peak
+ * beats any short peak that isn't at least this many dB louder.
+ */
+const LONG_PEAK_BONUS_DB = 10;
+/** Cast a wide net before sustain-filtering so we don't miss long-but-quieter peaks. */
+const RAW_PEAK_LIMIT = 24;
+/** Maximum peaks kept on a single emitted ping. */
+const FINAL_PEAK_LIMIT = 6;
+
 /** Absolute Hz tolerance below which the fractional tolerance is ignored. */
 const DUPLICATE_PING_MIN_HZ_TOLERANCE = 20;
 /** Fractional Hz tolerance (0.5% of the top peak frequency). */
@@ -187,35 +199,54 @@ export function createPingDetector(initial: PingDetectorConfig): PingDetector {
       minHz: config.minHz,
       maxHz: config.maxHz,
       minDb: triggerAmbientSubtracted ? -30 : -55,
-      maxPeaks: 8,
+      maxPeaks: RAW_PEAK_LIMIT,
     });
 
-    // Drop peaks whose bin didn't stay near its max long enough — these are
-    // fast transients (clicks, scrapes), not ringing resonances.
-    const sustainedPeaks = rawPeaks.filter((peak) => {
+    // Annotate every candidate with its bin's measured sustain duration and
+    // classify it as "long" (≥ LONG_PEAK_SUSTAIN_MS) vs "short".
+    const annotated = rawPeaks.map((peak) => {
       const bin = Math.round(
         (peak.frequencyHz * triggerFftSize) / triggerSampleRate,
       );
-      if (bin < 0 || bin >= sustain.length) return false;
-      return sustain[bin] >= config.minSustainMs;
+      const sustainMs =
+        bin >= 0 && bin < sustain.length ? sustain[bin] : 0;
+      const kind: "long" | "short" =
+        sustainMs >= LONG_PEAK_SUSTAIN_MS ? "long" : "short";
+      return { ...peak, sustainMs, kind };
     });
 
-    if (sustainedPeaks.length === 0) {
+    // Drop fast transients (clicks, scrapes) — anything that didn't last
+    // at least the configured minimum sustain.
+    const sustained = annotated.filter(
+      (p) => p.sustainMs >= config.minSustainMs,
+    );
+    if (sustained.length === 0) {
       return null;
     }
 
-    // Top peak is the loudest of the sustained set (preserved order from detectPeaks).
-    const topBin = Math.round(
-      (sustainedPeaks[0].frequencyHz * triggerFftSize) / triggerSampleRate,
-    );
-    const topPeakSustainMs =
-      topBin >= 0 && topBin < sustain.length ? sustain[topBin] : 0;
+    // Rank by magnitude with a fixed dB bonus for long peaks, so a clearly
+    // ringing tone wins over a slightly louder but transient peak.
+    const ranked = [...sustained].sort((a, b) => {
+      const scoreA = a.magnitude + (a.kind === "long" ? LONG_PEAK_BONUS_DB : 0);
+      const scoreB = b.magnitude + (b.kind === "long" ? LONG_PEAK_BONUS_DB : 0);
+      return scoreB - scoreA;
+    });
+
+    const finalPeaks = ranked
+      .slice(0, FINAL_PEAK_LIMIT)
+      .sort((a, b) => a.frequencyHz - b.frequencyHz);
+
+    // Top peak sustain = longest sustain seen across the kept peaks.
+    let topPeakSustainMs = 0;
+    for (const p of finalPeaks) {
+      if (p.sustainMs > topPeakSustainMs) topPeakSustainMs = p.sustainMs;
+    }
 
     return {
       id: `ping-${Date.now()}-${Math.random().toString(36).slice(2, 7)}`,
       detectedAt: new Date().toISOString(),
       spectrum: heldSpectrum,
-      peaks: sustainedPeaks.slice(0, 6),
+      peaks: finalPeaks,
       ambientSubtracted: triggerAmbientSubtracted,
       triggerBandDb,
       baselineBandDb: baselineDb,

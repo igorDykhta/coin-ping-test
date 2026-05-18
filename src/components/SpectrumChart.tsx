@@ -458,15 +458,21 @@ export function SpectrumChart({
         height - 8,
       );
 
-      const peakLineColor = "hsl(142 70% 55%)";
-      const peakLabelBg = "hsla(142, 70%, 25%, 0.85)";
+      const longLineColor = "hsl(142 70% 55%)";
+      const shortLineColor = "hsl(38 90% 60%)";
+      const longLabelBg = "hsla(142, 70%, 25%, 0.85)";
+      const shortLabelBg = "hsla(38, 75%, 25%, 0.85)";
       ctx.lineWidth = 1.5;
       ctx.font = "10px JetBrains Mono, ui-monospace, monospace";
 
       // Lines run from the top of the plot to its vertical midpoint only,
       // so the bottom half of the chart (where most peaks reach) stays clear.
       const peakLineBottomY = padding.top + plotH / 2;
-      const peakHits: { x: number; hz: number }[] = [];
+      const peakHits: {
+        x: number;
+        hz: number;
+        isShort: boolean;
+      }[] = [];
       for (const peak of peaks) {
         if (peak.frequencyHz < plotMinHz || peak.frequencyHz > axisMaxHz) {
           continue;
@@ -482,13 +488,16 @@ export function SpectrumChart({
           continue;
         }
         const x = plotLeft + barIndex * slotW + slotW / 2;
-        ctx.strokeStyle = peakLineColor;
+        const isShort = peak.kind === "short";
+        ctx.strokeStyle = isShort ? shortLineColor : longLineColor;
+        ctx.setLineDash(isShort ? [4, 3] : []);
         ctx.beginPath();
         ctx.moveTo(x, padding.top);
         ctx.lineTo(x, peakLineBottomY);
         ctx.stroke();
-        peakHits.push({ x, hz: peak.frequencyHz });
+        peakHits.push({ x, hz: peak.frequencyHz, isShort });
       }
+      ctx.setLineDash([]);
 
       // Hz labels at the top of each peak line, with vertical stacking when
       // labels overlap horizontally.
@@ -499,7 +508,7 @@ export function SpectrumChart({
         ctx.textBaseline = "middle";
         ctx.textAlign = "center";
         const placed: { x: number; row: number; w: number }[] = [];
-        for (const { x, hz } of peakHits) {
+        for (const { x, hz, isShort } of peakHits) {
           const text = `${Math.round(hz)} Hz`;
           const textW = ctx.measureText(text).width;
           const w = textW + labelPaddingX * 2;
@@ -516,9 +525,9 @@ export function SpectrumChart({
           placed.push({ x, row, w });
           const labelTop = padding.top + 2 + row * (labelH + labelGap);
           const labelLeft = Math.max(plotLeft, Math.min(plotLeft + plotW - w, x - w / 2));
-          ctx.fillStyle = peakLabelBg;
+          ctx.fillStyle = isShort ? shortLabelBg : longLabelBg;
           ctx.fillRect(labelLeft, labelTop, w, labelH);
-          ctx.fillStyle = "hsl(150 90% 92%)";
+          ctx.fillStyle = isShort ? "hsl(40 95% 90%)" : "hsl(150 90% 92%)";
           ctx.fillText(text, labelLeft + w / 2, labelTop + labelH / 2);
         }
       }
