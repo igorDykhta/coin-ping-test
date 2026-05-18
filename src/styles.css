@@ -1,5 +1,12 @@
 @import "@sqlrooms/ui/tailwind-preset.css";
 
+/**
+ * Tailwind v4 scans the project sources by default but skips node_modules.
+ * Add the @sqlrooms/ui dist so utility classes used inside their components
+ * (Dialog overlay, animations, positioning, etc.) are emitted.
+ */
+@source "../node_modules/@sqlrooms/ui/dist/**/*.{js,mjs,jsx,ts,tsx}";
+
 :root {
   --primary: 38 92% 50%;
   --primary-foreground: 48 96% 12%;

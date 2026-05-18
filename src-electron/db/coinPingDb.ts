@@ -28,8 +28,8 @@ function validateInput(input: ReferenceInput): void {
     if (!Number.isFinite(peak.frequencyHz) || peak.frequencyHz <= 0) {
       throw new ValidationError("Peak frequency must be a positive number.");
     }
-    if (!Number.isFinite(peak.magnitude) || peak.magnitude < 0) {
-      throw new ValidationError("Peak magnitude must be a non-negative number.");
+    if (!Number.isFinite(peak.magnitude)) {
+      throw new ValidationError("Peak magnitude must be a finite number.");
     }
   }
 }

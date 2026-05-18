@@ -1,10 +1,52 @@
 import type { ResonancePeak } from "../types/coinPing";
 
-/** Larger FFT → finer frequency bins (~6 Hz at 48 kHz). */
+/** Default live FFT (~6 Hz/bin at 48 kHz). */
 export const FFT_SIZE = 8192;
+/** Highest FFT size we'll switch to when zoomed (~1.5 Hz/bin at 48 kHz). */
+export const FFT_SIZE_MAX = 32_768;
+/** Above this visible span (Hz), keep FFT_SIZE for snappy response. */
+export const ZOOM_FFT_SPAN_THRESHOLD_HZ = 4_000;
+/** Target FFT bins inside the visible band when scaling FFT for zoom. */
+export const ZOOM_FFT_TARGET_BINS_IN_VIEW = 128;
+
+/** Round to a valid power-of-two AnalyserNode.fftSize in [32, 32768]. */
+function roundToValidAnalyserFftSize(size: number): number {
+  const exp = Math.min(15, Math.max(5, Math.round(Math.log2(size))));
+  return 2 ** exp;
+}
+
+/**
+ * Pick analyser FFT size from the visible Hz span. Wide views stay at FFT_SIZE
+ * for responsiveness; narrow zooms scale up to FFT_SIZE_MAX for more bins.
+ */
+export function resolveFftSizeForSpan(spanHz: number, sampleRate: number): number {
+  if (!Number.isFinite(spanHz) || spanHz <= 0 || !Number.isFinite(sampleRate)) {
+    return FFT_SIZE;
+  }
+  if (spanHz >= ZOOM_FFT_SPAN_THRESHOLD_HZ) {
+    return FFT_SIZE;
+  }
+  const targetBinHz = spanHz / ZOOM_FFT_TARGET_BINS_IN_VIEW;
+  const rounded = roundToValidAnalyserFftSize(sampleRate / targetBinHz);
+  return Math.max(FFT_SIZE, Math.min(FFT_SIZE_MAX, rounded));
+}
+/**
+ * Lower edge of the ping detection band. Keyboard, mouse, and touchpad clicks
+ * dump most of their energy below ~3-4 kHz; coin resonances sit well above.
+ */
+export const PING_DETECTION_MIN_HZ = 4_000;
+
 /** Frequency range shown on the chart (capped by Nyquist at runtime). */
-export const MIN_DISPLAY_HZ = 500;
-export const MAX_DISPLAY_HZ = 30_000;
+export const DEFAULT_MIN_DISPLAY_HZ = 500;
+export const DEFAULT_MAX_DISPLAY_HZ = 30_000;
+export const ABSOLUTE_MIN_DISPLAY_HZ = 50;
+export const ABSOLUTE_MAX_DISPLAY_HZ = 30_000;
+export const MIN_FREQ_SPAN_HZ = 100;
+
+/** @deprecated Use DEFAULT_* */
+export const MIN_DISPLAY_HZ = DEFAULT_MIN_DISPLAY_HZ;
+/** @deprecated Use DEFAULT_* */
+export const MAX_DISPLAY_HZ = DEFAULT_MAX_DISPLAY_HZ;
 
 /** Bar density on the chart (pixels per bar slot). */
 export const CHART_BAR_SLOT_PX = 2;
@@ -22,7 +64,7 @@ export const LIVE_INPUT_GAIN = 14;
 export const LIVE_DISPLAY_BOOST_DB = 18;
 
 /** Live view: narrower dB window → taller bars for the same signal. */
-export const LIVE_ANALYZER_MIN_DB = -90;
+export const LIVE_ANALYZER_MIN_DB = -100;
 export const LIVE_ANALYZER_MAX_DB = 0;
 
 /** Recording / default scale. */
@@ -33,7 +75,79 @@ export type SpectrumData = {
   values: Float32Array;
   sampleRate: number;
   fftSize: number;
+  ambientSubtracted?: boolean;
 };
+
+export type FrequencyRange = {
+  minHz: number;
+  maxHz: number;
+};
+
+export function nyquistHz(sampleRate: number): number {
+  return sampleRate / 2;
+}
+
+export function clampFrequencyRange(
+  minHz: number,
+  maxHz: number,
+  sampleRate: number,
+): FrequencyRange {
+  const nyquist = nyquistHz(sampleRate);
+  const maxCap = Math.min(ABSOLUTE_MAX_DISPLAY_HZ, nyquist);
+  let min = Math.max(ABSOLUTE_MIN_DISPLAY_HZ, minHz);
+  let max = Math.min(maxCap, maxHz);
+  if (max - min < MIN_FREQ_SPAN_HZ) {
+    max = Math.min(maxCap, min + MIN_FREQ_SPAN_HZ);
+  }
+  if (max - min < MIN_FREQ_SPAN_HZ) {
+    min = Math.max(ABSOLUTE_MIN_DISPLAY_HZ, max - MIN_FREQ_SPAN_HZ);
+  }
+  return { minHz: min, maxHz: max };
+}
+
+/** Nice tick marks for the current view range. */
+export function buildFrequencyGrid(minHz: number, maxHz: number): number[] {
+  const span = maxHz - minHz;
+  if (span <= 0) {
+    return [Math.round(minHz)];
+  }
+
+  const targetTicks = 8;
+  const rawStep = span / targetTicks;
+  const magnitude = 10 ** Math.floor(Math.log10(rawStep));
+  const normalized = rawStep / magnitude;
+  let step = magnitude;
+  if (normalized < 1.5) {
+    step = magnitude;
+  } else if (normalized < 3.5) {
+    step = 2 * magnitude;
+  } else if (normalized < 7.5) {
+    step = 5 * magnitude;
+  } else {
+    step = 10 * magnitude;
+  }
+
+  const ticks: number[] = [];
+  const start = Math.ceil(minHz / step) * step;
+  for (let hz = start; hz <= maxHz + step * 0.001; hz += step) {
+    ticks.push(Math.round(hz));
+  }
+
+  const roundedMin = Math.round(minHz);
+  const roundedMax = Math.round(maxHz);
+  if (ticks.length === 0 || ticks[0] > roundedMin + step * 0.05) {
+    ticks.unshift(roundedMin);
+  }
+  if (ticks[ticks.length - 1] < roundedMax - step * 0.05) {
+    ticks.push(roundedMax);
+  }
+
+  return [...new Set(ticks)].sort((a, b) => a - b);
+}
+
+/** Y axis after ambient subtraction. */
+export const AMBIENT_SUBTRACT_MIN_DB = -100;
+export const AMBIENT_SUBTRACT_MAX_DB = 40;
 
 export function binToFrequencyHz(bin: number, sampleRate: number, fftSize: number): number {
   return (bin * sampleRate) / fftSize;
@@ -196,15 +310,29 @@ export async function computeSpectrumFromBuffer(
 
 export function detectPeaks(
   spectrum: SpectrumData,
-  options: { maxPeaks?: number; minDb?: number; minBinSeparation?: number } = {},
+  options: {
+    maxPeaks?: number;
+    minDb?: number;
+    minBinSeparation?: number;
+    minHz?: number;
+    maxHz?: number;
+  } = {},
 ): ResonancePeak[] {
-  const { maxPeaks = 8, minDb = -70, minBinSeparation = 3 } = options;
+  const {
+    maxPeaks = 8,
+    minDb = -70,
+    minBinSeparation = 3,
+    minHz = DEFAULT_MIN_DISPLAY_HZ,
+    maxHz = DEFAULT_MAX_DISPLAY_HZ,
+  } = options;
   const { values, sampleRate, fftSize } = spectrum;
+  const { minHz: viewMin, maxHz: viewMax } = clampFrequencyRange(minHz, maxHz, sampleRate);
   const lastBin = maxDisplayBin(sampleRate, fftSize);
-  const minBin = Math.max(1, frequencyToBin(MIN_DISPLAY_HZ, sampleRate, fftSize));
+  const minBin = Math.max(1, frequencyToBin(viewMin, sampleRate, fftSize));
+  const maxBin = Math.min(lastBin, frequencyToBin(viewMax, sampleRate, fftSize));
   const candidates: ResonancePeak[] = [];
 
-  for (let i = minBin; i < lastBin; i += 1) {
+  for (let i = minBin; i <= maxBin; i += 1) {
     const magnitude = values[i];
     if (magnitude < minDb) {
       continue;

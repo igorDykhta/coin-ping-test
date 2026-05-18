@@ -7,9 +7,11 @@ import {
   CHART_BAR_SLOT_PX,
   CHART_MAX_BARS,
   CHART_MIN_BARS,
-  FREQUENCY_GRID_HZ,
+  buildFrequencyGrid,
+  clampFrequencyRange,
+  DEFAULT_MAX_DISPLAY_HZ,
+  DEFAULT_MIN_DISPLAY_HZ,
   maxDisplayBin,
-  MIN_DISPLAY_HZ,
   sampleLogFrequencySpectrum,
   sampleSpectrumAtBin,
   type SpectrumData,
@@ -23,8 +25,30 @@ type SpectrumChartProps = {
   minDb?: number;
   maxDb?: number;
   displayBoostDb?: number;
+  minHz?: number;
+  maxHz?: number;
   logFrequency?: boolean;
   peakHold?: boolean;
+  /**
+   * Optional secondary spectrum drawn as a line on top of the bars. Used to
+   * overlay a captured "max-hold" snapshot (e.g. the latest detected ping)
+   * over the still-updating live bars.
+   */
+  overlaySpectrum?: SpectrumData | null;
+  /**
+   * Enables mouse-wheel zoom anchored under the cursor. The callback receives
+   * the proposed (un-clamped) new frequency range; the parent is responsible
+   * for clamping / applying the change.
+   */
+  onRangeChange?: (minHz: number, maxHz: number) => void;
+};
+
+type PlotBounds = {
+  plotLeft: number;
+  plotW: number;
+  plotMinHz: number;
+  plotMaxHz: number;
+  logFrequency: boolean;
 };
 
 const Y_GRID_LINES = 10;
@@ -58,6 +82,7 @@ function barColorForLevel(t: number): string {
 function frequencyToBarIndex(
   hz: number,
   barCount: number,
+  minHz: number,
   maxHz: number,
   logFrequency: boolean,
 ): number {
@@ -65,12 +90,13 @@ function frequencyToBarIndex(
     return 0;
   }
   if (logFrequency) {
-    const logMin = Math.log10(MIN_DISPLAY_HZ);
+    const logMin = Math.log10(minHz);
     const logMax = Math.log10(maxHz);
     const t = (Math.log10(hz) - logMin) / (logMax - logMin);
     return Math.round(Math.max(0, Math.min(1, t)) * (barCount - 1));
   }
-  return Math.round((hz / maxHz) * (barCount - 1));
+  const t = (hz - minHz) / (maxHz - minHz);
+  return Math.round(Math.max(0, Math.min(1, t)) * (barCount - 1));
 }
 
 export function SpectrumChart({
@@ -80,21 +106,79 @@ export function SpectrumChart({
   minDb = ANALYZER_MIN_DB,
   maxDb = ANALYZER_MAX_DB,
   displayBoostDb = 0,
+  minHz = DEFAULT_MIN_DISPLAY_HZ,
+  maxHz = DEFAULT_MAX_DISPLAY_HZ,
   logFrequency = true,
   peakHold = false,
+  overlaySpectrum = null,
+  onRangeChange,
 }: SpectrumChartProps) {
   const canvasRef = useRef<HTMLCanvasElement | null>(null);
   const containerRef = useRef<HTMLDivElement | null>(null);
   const peakHoldRef = useRef<Float32Array | null>(null);
   const peakHoldEnabledRef = useRef(peakHold);
+  const plotBoundsRef = useRef<PlotBounds | null>(null);
+  const onRangeChangeRef = useRef(onRangeChange);
 
   peakHoldEnabledRef.current = peakHold;
+  onRangeChangeRef.current = onRangeChange;
 
   useEffect(() => {
     if (!peakHold) {
       peakHoldRef.current = null;
     }
   }, [peakHold]);
+
+  // Bar indices are tied to the current range; invalidate peak-hold on zoom.
+  useEffect(() => {
+    peakHoldRef.current = null;
+  }, [minHz, maxHz]);
+
+  useEffect(() => {
+    const canvas = canvasRef.current;
+    if (!canvas) {
+      return;
+    }
+    const handleWheel = (event: WheelEvent) => {
+      const handler = onRangeChangeRef.current;
+      const bounds = plotBoundsRef.current;
+      if (!handler || !bounds) return;
+      const rect = canvas.getBoundingClientRect();
+      const mouseX = event.clientX - rect.left;
+      const relX = mouseX - bounds.plotLeft;
+      if (relX < 0 || relX > bounds.plotW) return;
+
+      event.preventDefault();
+
+      const t = bounds.plotW <= 0 ? 0 : relX / bounds.plotW;
+
+      // Smooth, magnitude-aware zoom factor (trackpads send small deltas,
+      // clicky mice send ~100). intensity caps at 0.5 (50% zoom per event).
+      const intensity = Math.min(0.5, Math.abs(event.deltaY) / 500);
+      if (intensity === 0) return;
+      const factor = event.deltaY > 0 ? 1 + intensity : 1 / (1 + intensity);
+
+      let newMin: number;
+      let newMax: number;
+      if (bounds.logFrequency) {
+        const logMin = Math.log10(bounds.plotMinHz);
+        const logMax = Math.log10(bounds.plotMaxHz);
+        const logF = logMin + t * (logMax - logMin);
+        const newLogMin = logF - (logF - logMin) * factor;
+        const newLogMax = logF + (logMax - logF) * factor;
+        newMin = 10 ** newLogMin;
+        newMax = 10 ** newLogMax;
+      } else {
+        const freqF = bounds.plotMinHz + t * (bounds.plotMaxHz - bounds.plotMinHz);
+        newMin = freqF - (freqF - bounds.plotMinHz) * factor;
+        newMax = freqF + (bounds.plotMaxHz - freqF) * factor;
+      }
+      handler(newMin, newMax);
+    };
+
+    canvas.addEventListener("wheel", handleWheel, { passive: false });
+    return () => canvas.removeEventListener("wheel", handleWheel);
+  }, []);
 
   useEffect(() => {
     const canvas = canvasRef.current;
@@ -191,8 +275,21 @@ export function SpectrumChart({
 
       const { values, sampleRate, fftSize } = spectrum;
       const lastBin = maxDisplayBin(sampleRate, fftSize);
-      const maxHz = binToFrequencyHz(lastBin, sampleRate, fftSize);
+      const dataMaxHz = binToFrequencyHz(lastBin, sampleRate, fftSize);
+      const { minHz: plotMinHz, maxHz: plotMaxHz } = clampFrequencyRange(
+        minHz,
+        maxHz,
+        sampleRate,
+      );
+      const axisMaxHz = Math.min(plotMaxHz, dataMaxHz);
       const binHz = sampleRate / fftSize;
+      plotBoundsRef.current = {
+        plotLeft,
+        plotW,
+        plotMinHz,
+        plotMaxHz: axisMaxHz,
+        logFrequency,
+      };
 
       const barCount = Math.max(
         CHART_MIN_BARS,
@@ -200,12 +297,23 @@ export function SpectrumChart({
       );
 
       const barValues = logFrequency
-        ? sampleLogFrequencySpectrum(values, sampleRate, fftSize, barCount)
+        ? sampleLogFrequencySpectrum(
+            values,
+            sampleRate,
+            fftSize,
+            barCount,
+            plotMinHz,
+            axisMaxHz,
+          )
         : (() => {
             const linear = new Float32Array(barCount);
+            const span = axisMaxHz - plotMinHz;
             for (let i = 0; i < barCount; i += 1) {
-              const bin = (i / Math.max(1, barCount - 1)) * lastBin;
-              linear[i] = sampleSpectrumAtBin(values, bin);
+              const t = barCount <= 1 ? 0 : i / (barCount - 1);
+              const hz = plotMinHz + t * span;
+              const bin = (hz * fftSize) / sampleRate;
+              linear[i] =
+                bin >= lastBin ? values[lastBin] : sampleSpectrumAtBin(values, bin);
             }
             return linear;
           })();
@@ -213,14 +321,12 @@ export function SpectrumChart({
       const slotW = plotW / barCount;
       const barW = Math.max(1, slotW * 0.88);
 
-      const freqTicks = FREQUENCY_GRID_HZ.filter(
-        (hz) => hz >= MIN_DISPLAY_HZ && hz <= maxHz,
-      );
+      const freqTicks = buildFrequencyGrid(plotMinHz, axisMaxHz);
 
       ctx.strokeStyle = "hsl(222 27% 18%)";
       ctx.lineWidth = 1;
       for (const hz of freqTicks) {
-        const barIndex = frequencyToBarIndex(hz, barCount, maxHz, logFrequency);
+        const barIndex = frequencyToBarIndex(hz, barCount, plotMinHz, axisMaxHz, logFrequency);
         const x = plotLeft + barIndex * slotW + slotW / 2;
         ctx.beginPath();
         ctx.moveTo(x, padding.top);
@@ -270,6 +376,60 @@ export function SpectrumChart({
         }
       }
 
+      // Overlay: the captured max-hold spectrum from the latest detected ping,
+      // drawn as a line trace on top of the bars.
+      if (overlaySpectrum) {
+        const overlayValues = logFrequency
+          ? sampleLogFrequencySpectrum(
+              overlaySpectrum.values,
+              overlaySpectrum.sampleRate,
+              overlaySpectrum.fftSize,
+              barCount,
+              plotMinHz,
+              axisMaxHz,
+            )
+          : (() => {
+              const lastOvBin = maxDisplayBin(
+                overlaySpectrum.sampleRate,
+                overlaySpectrum.fftSize,
+              );
+              const out = new Float32Array(barCount);
+              const span = axisMaxHz - plotMinHz;
+              for (let i = 0; i < barCount; i += 1) {
+                const t = barCount <= 1 ? 0 : i / (barCount - 1);
+                const hz = plotMinHz + t * span;
+                const bin =
+                  (hz * overlaySpectrum.fftSize) / overlaySpectrum.sampleRate;
+                out[i] =
+                  bin >= lastOvBin
+                    ? overlaySpectrum.values[lastOvBin]
+                    : sampleSpectrumAtBin(overlaySpectrum.values, bin);
+              }
+              return out;
+            })();
+
+        ctx.lineWidth = 1.8;
+        ctx.lineJoin = "round";
+        ctx.lineCap = "round";
+        ctx.strokeStyle = "hsla(142, 85%, 60%, 0.95)";
+        ctx.beginPath();
+        let started = false;
+        for (let i = 0; i < barCount; i += 1) {
+          const db = overlayValues[i];
+          if (!Number.isFinite(db)) continue;
+          const h = mapHeight(db);
+          const x = plotLeft + i * slotW + slotW / 2;
+          const y = plotBottom - h;
+          if (!started) {
+            ctx.moveTo(x, y);
+            started = true;
+          } else {
+            ctx.lineTo(x, y);
+          }
+        }
+        if (started) ctx.stroke();
+      }
+
       ctx.fillStyle = "hsl(215 20% 60%)";
       ctx.textAlign = "center";
       ctx.font = "10px JetBrains Mono, ui-monospace, monospace";
@@ -277,7 +437,7 @@ export function SpectrumChart({
 
       let lastLabelX = -Infinity;
       for (const hz of freqTicks) {
-        const barIndex = frequencyToBarIndex(hz, barCount, maxHz, logFrequency);
+        const barIndex = frequencyToBarIndex(hz, barCount, plotMinHz, axisMaxHz, logFrequency);
         const x = plotLeft + barIndex * slotW + slotW / 2;
         if (x - lastLabelX < X_LABEL_SKIP_THRESHOLD) {
           continue;
@@ -289,29 +449,78 @@ export function SpectrumChart({
       ctx.textAlign = "left";
       ctx.fillStyle = "hsl(215 20% 45%)";
       ctx.font = "9px JetBrains Mono, ui-monospace, monospace";
+      const viewSpanHz = axisMaxHz - plotMinHz;
+      const hzPerBar = viewSpanHz / Math.max(1, barCount);
+      const fftBinsInView = Math.max(1, Math.ceil(viewSpanHz / binHz));
       ctx.fillText(
-        `${Math.round(binHz)} Hz/bin · ${barCount} bars`,
+        `${barCount} bars · ${fftBinsInView} FFT bins · ${binHz.toFixed(1)} Hz/bin · ~${hzPerBar.toFixed(1)} Hz/bar`,
         plotLeft,
         height - 8,
       );
 
+      const peakLineColor = "hsl(142 70% 55%)";
+      const peakLabelBg = "hsla(142, 70%, 25%, 0.85)";
+      ctx.lineWidth = 1.5;
+      ctx.font = "10px JetBrains Mono, ui-monospace, monospace";
+
+      // Lines run from the top of the plot to its vertical midpoint only,
+      // so the bottom half of the chart (where most peaks reach) stays clear.
+      const peakLineBottomY = padding.top + plotH / 2;
+      const peakHits: { x: number; hz: number }[] = [];
       for (const peak of peaks) {
+        if (peak.frequencyHz < plotMinHz || peak.frequencyHz > axisMaxHz) {
+          continue;
+        }
         const barIndex = frequencyToBarIndex(
           peak.frequencyHz,
           barCount,
-          maxHz,
+          plotMinHz,
+          axisMaxHz,
           logFrequency,
         );
         if (barIndex < 0 || barIndex >= barCount) {
           continue;
         }
         const x = plotLeft + barIndex * slotW + slotW / 2;
-        ctx.strokeStyle = "hsl(142 70% 55%)";
-        ctx.lineWidth = 1.5;
+        ctx.strokeStyle = peakLineColor;
         ctx.beginPath();
         ctx.moveTo(x, padding.top);
-        ctx.lineTo(x, plotBottom);
+        ctx.lineTo(x, peakLineBottomY);
         ctx.stroke();
+        peakHits.push({ x, hz: peak.frequencyHz });
+      }
+
+      // Hz labels at the top of each peak line, with vertical stacking when
+      // labels overlap horizontally.
+      if (peakHits.length > 0) {
+        const labelPaddingX = 4;
+        const labelH = 14;
+        const labelGap = 2;
+        ctx.textBaseline = "middle";
+        ctx.textAlign = "center";
+        const placed: { x: number; row: number; w: number }[] = [];
+        for (const { x, hz } of peakHits) {
+          const text = `${Math.round(hz)} Hz`;
+          const textW = ctx.measureText(text).width;
+          const w = textW + labelPaddingX * 2;
+          let row = 0;
+          while (
+            placed.some(
+              (p) =>
+                p.row === row &&
+                Math.abs(p.x - x) < (p.w + w) / 2 + 2,
+            )
+          ) {
+            row += 1;
+          }
+          placed.push({ x, row, w });
+          const labelTop = padding.top + 2 + row * (labelH + labelGap);
+          const labelLeft = Math.max(plotLeft, Math.min(plotLeft + plotW - w, x - w / 2));
+          ctx.fillStyle = peakLabelBg;
+          ctx.fillRect(labelLeft, labelTop, w, labelH);
+          ctx.fillStyle = "hsl(150 90% 92%)";
+          ctx.fillText(text, labelLeft + w / 2, labelTop + labelH / 2);
+        }
       }
 
       if (title) {
@@ -327,11 +536,15 @@ export function SpectrumChart({
     const observer = new ResizeObserver(draw);
     observer.observe(container);
     return () => observer.disconnect();
-  }, [spectrum, peaks, title, minDb, maxDb, displayBoostDb, logFrequency, peakHold]);
+  }, [spectrum, peaks, title, minDb, maxDb, displayBoostDb, minHz, maxHz, logFrequency, peakHold, overlaySpectrum]);
 
   return (
     <div ref={containerRef} className="h-full min-h-[320px] w-full">
-      <canvas ref={canvasRef} className="block h-full w-full" />
+      <canvas
+        ref={canvasRef}
+        className={`block h-full w-full${onRangeChange ? " cursor-crosshair" : ""}`}
+        title={onRangeChange ? "Scroll to zoom (anchored at cursor)" : undefined}
+      />
     </div>
   );
 }
