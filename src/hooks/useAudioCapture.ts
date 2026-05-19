@@ -22,6 +22,7 @@ import {
   type DetectedPing,
   type PingDetector,
 } from "../lib/pingDetector";
+import type { ResonancePeak } from "../types/coinPing";
 
 /** Limit React spectrum updates (~20 fps) to avoid memory pressure. */
 const LIVE_UI_INTERVAL_MS = 50;
@@ -585,6 +586,92 @@ export function useAudioCapture(options: UseAudioCaptureOptions = {}) {
     setDetectedPings((prev) => prev.filter((p) => p.id !== id));
   }, []);
 
+  /**
+   * Append a user-defined peak. If any pings already exist, the peak is added
+   * to the most recent one; otherwise a fresh ping is created so the peak has
+   * somewhere to live.
+   */
+  const addManualPeak = useCallback(
+    (frequencyHz: number, kind: "long" | "short") => {
+      if (!Number.isFinite(frequencyHz) || frequencyHz <= 0) return;
+
+      const sustainMs = kind === "long" ? 300 : 150;
+      const sourceSpectrum =
+        liveValuesRef.current && analyserRef.current && audioContextRef.current
+          ? {
+              values: new Float32Array(liveValuesRef.current),
+              sampleRate: audioContextRef.current.sampleRate,
+              fftSize: analyserRef.current.fftSize,
+              ambientSubtracted:
+                subtractEnabledRef.current &&
+                ambientProfileRef.current !== null,
+            }
+          : null;
+
+      // Best-effort magnitude estimate from the live spectrum, or a
+      // sensible placeholder when there's no audio context yet.
+      let magnitude = -30;
+      if (sourceSpectrum) {
+        const bin = Math.round(
+          (frequencyHz * sourceSpectrum.fftSize) / sourceSpectrum.sampleRate,
+        );
+        if (bin >= 0 && bin < sourceSpectrum.values.length) {
+          const v = sourceSpectrum.values[bin];
+          if (Number.isFinite(v)) magnitude = v;
+        }
+      }
+
+      const newPeak: ResonancePeak = {
+        frequencyHz,
+        magnitude,
+        kind,
+        sustainMs,
+      };
+
+      setDetectedPings((prev) => {
+        if (prev.length === 0) {
+          const fallbackSpectrum =
+            sourceSpectrum ?? {
+              values: new Float32Array(0),
+              sampleRate: 48_000,
+              fftSize: FFT_SIZE,
+              ambientSubtracted: false,
+            };
+          const created: DetectedPing = {
+            id: `ping-manual-${Date.now()}-${Math.random()
+              .toString(36)
+              .slice(2, 7)}`,
+            detectedAt: new Date().toISOString(),
+            spectrum: fallbackSpectrum,
+            peaks: [newPeak],
+            ambientSubtracted: fallbackSpectrum.ambientSubtracted,
+            triggerBandDb: 0,
+            baselineBandDb: 0,
+            topPeakSustainMs: sustainMs,
+          };
+          return [...prev, created];
+        }
+
+        const next = prev.slice();
+        const lastIndex = next.length - 1;
+        const last = next[lastIndex];
+        const peaks = [...last.peaks, newPeak].sort(
+          (a, b) => a.frequencyHz - b.frequencyHz,
+        );
+        next[lastIndex] = {
+          ...last,
+          peaks,
+          topPeakSustainMs: Math.max(
+            last.topPeakSustainMs ?? 0,
+            sustainMs,
+          ),
+        };
+        return next;
+      });
+    },
+    [],
+  );
+
   useEffect(() => {
     return () => {
       cleanupStream();
@@ -607,5 +694,6 @@ export function useAudioCapture(options: UseAudioCaptureOptions = {}) {
     detectedPings,
     clearDetectedPings,
     dismissDetectedPing,
+    addManualPeak,
   };
 }

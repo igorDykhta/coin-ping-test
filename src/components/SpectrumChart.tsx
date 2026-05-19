@@ -36,11 +36,28 @@ type SpectrumChartProps = {
    */
   overlaySpectrum?: SpectrumData | null;
   /**
+   * Frequencies (Hz) of a saved reference recording to highlight as blue
+   * tolerance bands underneath the bars. Each entry produces a 10 px wide
+   * (±5 px) semi-transparent rectangle plus a thin center line.
+   *
+   * If `color` is provided, an additional colored circle is drawn at the top
+   * of the chart so users can visually distinguish multiple references that
+   * are simultaneously overlaid. Circles at the same x position stack
+   * vertically.
+   */
+  referenceLines?: readonly { frequencyHz: number; color?: string }[];
+  /**
    * Enables mouse-wheel zoom anchored under the cursor. The callback receives
    * the proposed (un-clamped) new frequency range; the parent is responsible
    * for clamping / applying the change.
    */
   onRangeChange?: (minHz: number, maxHz: number) => void;
+  /**
+   * Right-click handler. Receives the frequency under the cursor (Hz) and the
+   * native event so the parent can position a context menu. The native menu
+   * is suppressed automatically.
+   */
+  onContextMenuFrequency?: (frequencyHz: number, event: MouseEvent) => void;
 };
 
 type PlotBounds = {
@@ -111,7 +128,9 @@ export function SpectrumChart({
   logFrequency = true,
   peakHold = false,
   overlaySpectrum = null,
+  referenceLines,
   onRangeChange,
+  onContextMenuFrequency,
 }: SpectrumChartProps) {
   const canvasRef = useRef<HTMLCanvasElement | null>(null);
   const containerRef = useRef<HTMLDivElement | null>(null);
@@ -119,9 +138,11 @@ export function SpectrumChart({
   const peakHoldEnabledRef = useRef(peakHold);
   const plotBoundsRef = useRef<PlotBounds | null>(null);
   const onRangeChangeRef = useRef(onRangeChange);
+  const onContextMenuFrequencyRef = useRef(onContextMenuFrequency);
 
   peakHoldEnabledRef.current = peakHold;
   onRangeChangeRef.current = onRangeChange;
+  onContextMenuFrequencyRef.current = onContextMenuFrequency;
 
   useEffect(() => {
     if (!peakHold) {
@@ -176,8 +197,37 @@ export function SpectrumChart({
       handler(newMin, newMax);
     };
 
+    const handleContextMenu = (event: MouseEvent) => {
+      const handler = onContextMenuFrequencyRef.current;
+      const bounds = plotBoundsRef.current;
+      if (!handler || !bounds) return;
+      const rect = canvas.getBoundingClientRect();
+      const mouseX = event.clientX - rect.left;
+      const relX = mouseX - bounds.plotLeft;
+      if (relX < 0 || relX > bounds.plotW) return;
+
+      // NOTE: do NOT call event.preventDefault() here. We rely on the parent's
+      // Radix ContextMenuTrigger to handle suppression of the native browser
+      // menu *and* open its own menu; Radix's `composeEventHandlers` skips
+      // its handler when `event.defaultPrevented` is already true.
+      const t = bounds.plotW <= 0 ? 0 : relX / bounds.plotW;
+      let freq: number;
+      if (bounds.logFrequency) {
+        const logMin = Math.log10(bounds.plotMinHz);
+        const logMax = Math.log10(bounds.plotMaxHz);
+        freq = 10 ** (logMin + t * (logMax - logMin));
+      } else {
+        freq = bounds.plotMinHz + t * (bounds.plotMaxHz - bounds.plotMinHz);
+      }
+      handler(freq, event);
+    };
+
     canvas.addEventListener("wheel", handleWheel, { passive: false });
-    return () => canvas.removeEventListener("wheel", handleWheel);
+    canvas.addEventListener("contextmenu", handleContextMenu);
+    return () => {
+      canvas.removeEventListener("wheel", handleWheel);
+      canvas.removeEventListener("contextmenu", handleContextMenu);
+    };
   }, []);
 
   useEffect(() => {
@@ -332,6 +382,101 @@ export function SpectrumChart({
         ctx.moveTo(x, padding.top);
         ctx.lineTo(x, plotBottom);
         ctx.stroke();
+      }
+
+      // Reference-recording overlay: blue ±5 px tolerance bands + center
+      // lines drawn underneath the bars so peaks and bars remain readable.
+      if (referenceLines && referenceLines.length > 0) {
+        const halfWidthPx = 5;
+        ctx.fillStyle = "hsla(210, 95%, 60%, 0.18)";
+        for (const ref of referenceLines) {
+          if (
+            !Number.isFinite(ref.frequencyHz) ||
+            ref.frequencyHz < plotMinHz ||
+            ref.frequencyHz > axisMaxHz
+          ) {
+            continue;
+          }
+          const barIndex = frequencyToBarIndex(
+            ref.frequencyHz,
+            barCount,
+            plotMinHz,
+            axisMaxHz,
+            logFrequency,
+          );
+          if (barIndex < 0 || barIndex >= barCount) continue;
+          const x = plotLeft + barIndex * slotW + slotW / 2;
+          ctx.fillRect(x - halfWidthPx, padding.top, halfWidthPx * 2, plotH);
+        }
+        ctx.strokeStyle = "hsla(210, 100%, 70%, 0.85)";
+        ctx.lineWidth = 1;
+        for (const ref of referenceLines) {
+          if (
+            !Number.isFinite(ref.frequencyHz) ||
+            ref.frequencyHz < plotMinHz ||
+            ref.frequencyHz > axisMaxHz
+          ) {
+            continue;
+          }
+          const barIndex = frequencyToBarIndex(
+            ref.frequencyHz,
+            barCount,
+            plotMinHz,
+            axisMaxHz,
+            logFrequency,
+          );
+          if (barIndex < 0 || barIndex >= barCount) continue;
+          const x = plotLeft + barIndex * slotW + slotW / 2;
+          ctx.beginPath();
+          ctx.moveTo(x, padding.top);
+          ctx.lineTo(x, plotBottom);
+          ctx.stroke();
+        }
+
+        // Colored marker circles at the top of the plot — one per reference
+        // line that supplied a color. Multiple circles at the same x stack
+        // vertically so all selected presets remain visible.
+        const circleRadius = 4;
+        const circleSpacing = circleRadius * 2 + 2;
+        const circleStartY = padding.top + circleRadius + 1;
+        const stacks = new Map<number, string[]>();
+        for (const ref of referenceLines) {
+          if (!ref.color) continue;
+          if (
+            !Number.isFinite(ref.frequencyHz) ||
+            ref.frequencyHz < plotMinHz ||
+            ref.frequencyHz > axisMaxHz
+          ) {
+            continue;
+          }
+          const barIndex = frequencyToBarIndex(
+            ref.frequencyHz,
+            barCount,
+            plotMinHz,
+            axisMaxHz,
+            logFrequency,
+          );
+          if (barIndex < 0 || barIndex >= barCount) continue;
+          const x = Math.round(plotLeft + barIndex * slotW + slotW / 2);
+          const list = stacks.get(x);
+          if (list) {
+            list.push(ref.color);
+          } else {
+            stacks.set(x, [ref.color]);
+          }
+        }
+        for (const [x, colors] of stacks) {
+          for (let i = 0; i < colors.length; i += 1) {
+            const cy = circleStartY + i * circleSpacing;
+            ctx.beginPath();
+            ctx.arc(x, cy, circleRadius, 0, Math.PI * 2);
+            ctx.fillStyle = colors[i];
+            ctx.fill();
+            ctx.lineWidth = 1;
+            ctx.strokeStyle = "rgba(15, 23, 42, 0.85)";
+            ctx.stroke();
+          }
+        }
       }
 
       if (peakHoldEnabledRef.current) {
@@ -545,7 +690,7 @@ export function SpectrumChart({
     const observer = new ResizeObserver(draw);
     observer.observe(container);
     return () => observer.disconnect();
-  }, [spectrum, peaks, title, minDb, maxDb, displayBoostDb, minHz, maxHz, logFrequency, peakHold, overlaySpectrum]);
+  }, [spectrum, peaks, title, minDb, maxDb, displayBoostDb, minHz, maxHz, logFrequency, peakHold, overlaySpectrum, referenceLines]);
 
   return (
     <div ref={containerRef} className="h-full min-h-[320px] w-full">

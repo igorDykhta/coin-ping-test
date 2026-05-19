@@ -1,5 +1,17 @@
-import { useCallback, useEffect, useMemo, useState } from "react";
-import { Button, Card, CardContent, CardHeader, CardTitle, cn } from "@sqlrooms/ui";
+import { useCallback, useEffect, useMemo, useRef, useState } from "react";
+import {
+  Button,
+  Card,
+  CardContent,
+  CardHeader,
+  CardTitle,
+  ContextMenu,
+  ContextMenuContent,
+  ContextMenuItem,
+  ContextMenuSeparator,
+  ContextMenuTrigger,
+  cn,
+} from "@sqlrooms/ui";
 
 import { AmbientControls } from "./AmbientControls";
 import { FrequencyRangeControls } from "./FrequencyRangeControls";
@@ -7,6 +19,8 @@ import { SpectrumChart } from "./SpectrumChart";
 import { useAudioCapture } from "../hooks/useAudioCapture";
 import { useFrequencyRange } from "../hooks/useFrequencyRange";
 import type { DetectedPing } from "../lib/pingDetector";
+import { getReferenceColor } from "../lib/referenceColors";
+import type { ReferenceRecord } from "../types/coinPing";
 import {
   AMBIENT_SUBTRACT_MAX_DB,
   AMBIENT_SUBTRACT_MIN_DB,
@@ -31,10 +45,17 @@ export type DetectedPingsExternalState = {
 
 type LiveSpectrumPanelProps = {
   onDetectedPingsChange?: (state: DetectedPingsExternalState) => void;
+  /**
+   * Saved reference recordings whose peak frequencies should be highlighted on
+   * the chart. All peaks from all selected references are overlaid together so
+   * the user can compare several presets at once.
+   */
+  selectedReferences?: readonly ReferenceRecord[];
 };
 
 export function LiveSpectrumPanel({
   onDetectedPingsChange,
+  selectedReferences = [],
 }: LiveSpectrumPanelProps = {}) {
   const [desiredFftSize, setDesiredFftSize] = useState<number>(FFT_SIZE);
   const [pingDetectionEnabled, setPingDetectionEnabled] = useState<boolean>(true);
@@ -73,6 +94,7 @@ export function LiveSpectrumPanel({
     detectedPings,
     clearDetectedPings,
     dismissDetectedPing,
+    addManualPeak,
   } = useAudioCapture({
     fftSize: desiredFftSize,
     pingDetectionEnabled: pingDetectionEnabled && detectionBandValid,
@@ -85,9 +107,44 @@ export function LiveSpectrumPanel({
   // live signal.
   const latestPing = detectedPings[detectedPings.length - 1] ?? null;
 
+  // Frequency under the cursor at the moment of right-click — captured by the
+  // chart and consumed by the context-menu items below.
+  const contextMenuFrequencyRef = useRef<number | null>(null);
+  const [contextMenuFrequency, setContextMenuFrequency] = useState<
+    number | null
+  >(null);
+  const handleChartContextMenu = useCallback((hz: number) => {
+    contextMenuFrequencyRef.current = hz;
+    setContextMenuFrequency(hz);
+  }, []);
+  const handleAddManualPeak = useCallback(
+    (kind: "long" | "short") => {
+      const hz = contextMenuFrequencyRef.current;
+      if (hz === null) return;
+      addManualPeak(hz, kind);
+    },
+    [addManualPeak],
+  );
+
   const displaySpectrum = recordingSpectrum ?? liveSpectrum;
   const maxAudibleHz = sampleRate ? Math.floor(sampleRate / 2) : null;
   const lowSampleRate = sampleRate !== null && sampleRate < 44_100;
+
+  // Merge peak frequencies from every selected reference so they are all drawn
+  // as blue tolerance bands on the chart simultaneously. Each peak is tagged
+  // with the reference's stable color so the chart can also draw a colored
+  // marker circle to distinguish presets.
+  const referenceLines = useMemo(() => {
+    if (selectedReferences.length === 0) return undefined;
+    const lines: { frequencyHz: number; color: string }[] = [];
+    for (const ref of selectedReferences) {
+      const color = getReferenceColor(ref.id);
+      for (const peak of ref.peaks) {
+        lines.push({ frequencyHz: peak.frequencyHz, color });
+      }
+    }
+    return lines;
+  }, [selectedReferences]);
 
   useEffect(() => {
     const next = displaySpectrum?.sampleRate ?? null;
@@ -301,25 +358,73 @@ export function LiveSpectrumPanel({
         </p>
 
         <div className="min-h-0 flex-1 rounded-md border border-border bg-card">
-          <SpectrumChart
-            key={recordingSpectrum ? "recording" : "live"}
-            spectrum={displaySpectrum}
-            peaks={chartPeaks}
-            onRangeChange={recordingSpectrum ? undefined : setRange}
-            title={chartTitle}
-            minDb={
-              usesAmbientScale ? AMBIENT_SUBTRACT_MIN_DB : recordingSpectrum ? ANALYZER_MIN_DB : LIVE_ANALYZER_MIN_DB
-            }
-            maxDb={
-              usesAmbientScale ? AMBIENT_SUBTRACT_MAX_DB : recordingSpectrum ? ANALYZER_MAX_DB : LIVE_ANALYZER_MAX_DB
-            }
-            displayBoostDb={usesAmbientScale || recordingSpectrum ? 0 : LIVE_DISPLAY_BOOST_DB}
-            minHz={minHz}
-            maxHz={maxHz}
-            logFrequency
-            peakHold={!recordingSpectrum}
-            overlaySpectrum={recordingSpectrum ? null : latestPing?.spectrum ?? null}
-          />
+          <ContextMenu
+            onOpenChange={(open) => {
+              if (!open) setContextMenuFrequency(null);
+            }}
+          >
+            <ContextMenuTrigger asChild>
+              <div className="h-full w-full">
+                <SpectrumChart
+                  key={recordingSpectrum ? "recording" : "live"}
+                  spectrum={displaySpectrum}
+                  peaks={chartPeaks}
+                  onRangeChange={recordingSpectrum ? undefined : setRange}
+                  onContextMenuFrequency={
+                    recordingSpectrum ? undefined : handleChartContextMenu
+                  }
+                  title={chartTitle}
+                  minDb={
+                    usesAmbientScale
+                      ? AMBIENT_SUBTRACT_MIN_DB
+                      : recordingSpectrum
+                        ? ANALYZER_MIN_DB
+                        : LIVE_ANALYZER_MIN_DB
+                  }
+                  maxDb={
+                    usesAmbientScale
+                      ? AMBIENT_SUBTRACT_MAX_DB
+                      : recordingSpectrum
+                        ? ANALYZER_MAX_DB
+                        : LIVE_ANALYZER_MAX_DB
+                  }
+                  displayBoostDb={
+                    usesAmbientScale || recordingSpectrum
+                      ? 0
+                      : LIVE_DISPLAY_BOOST_DB
+                  }
+                  minHz={minHz}
+                  maxHz={maxHz}
+                  logFrequency
+                  peakHold={!recordingSpectrum}
+                  overlaySpectrum={
+                    recordingSpectrum ? null : latestPing?.spectrum ?? null
+                  }
+                  referenceLines={referenceLines}
+                />
+              </div>
+            </ContextMenuTrigger>
+            <ContextMenuContent>
+              <div className="px-2 py-1 text-[11px] text-muted-foreground">
+                {contextMenuFrequency !== null
+                  ? `${Math.round(contextMenuFrequency)} Hz`
+                  : "—"}
+              </div>
+              <ContextMenuSeparator />
+              <ContextMenuItem
+                disabled={contextMenuFrequency === null}
+                onSelect={() => handleAddManualPeak("long")}
+              >
+                Add long peak
+              </ContextMenuItem>
+              <ContextMenuItem
+                disabled={contextMenuFrequency === null}
+                onSelect={() => handleAddManualPeak("short")}
+              >
+                Add short peak
+              </ContextMenuItem>
+            </ContextMenuContent>
+          </ContextMenu>
         </div>
 
         {recordingPeaks.length > 0 ? (
