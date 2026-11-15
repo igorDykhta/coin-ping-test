@@ -36,6 +36,11 @@ type SpectrumChartProps = {
    */
   overlaySpectrum?: SpectrumData | null;
   /**
+   * Optional time-averaged power spectrum (post-transient integral) drawn as a
+   * red line on top of the bars alongside the max-hold overlay.
+   */
+  accumulatedOverlaySpectrum?: SpectrumData | null;
+  /**
    * Frequencies (Hz) of a saved reference recording to highlight as blue
    * tolerance bands underneath the bars. Each entry produces a 10 px wide
    * (±5 px) semi-transparent rectangle plus a thin center line.
@@ -58,7 +63,23 @@ type SpectrumChartProps = {
    * is suppressed automatically.
    */
   onContextMenuFrequency?: (frequencyHz: number, event: MouseEvent) => void;
+  /**
+   * Active auto-detect capture window. Draws a horizontal progress bar that
+   * shrinks as the capture window elapses.
+   */
+  captureWindow?: { startedAtMs: number; totalMs: number } | null;
+  /** When true, show a full-width amber bar (manual recording). */
+  isRecordingActive?: boolean;
 };
+
+function captureRemainingFraction(
+  window: { startedAtMs: number; totalMs: number },
+  nowMs = performance.now(),
+): number {
+  const totalMs = Math.max(1, window.totalMs);
+  const elapsedMs = Math.max(0, Math.min(totalMs, nowMs - window.startedAtMs));
+  return Math.max(0, 1 - elapsedMs / totalMs);
+}
 
 type PlotBounds = {
   plotLeft: number;
@@ -116,6 +137,74 @@ function frequencyToBarIndex(
   return Math.round(Math.max(0, Math.min(1, t)) * (barCount - 1));
 }
 
+function sampleOverlayForBars(
+  overlay: SpectrumData,
+  barCount: number,
+  plotMinHz: number,
+  axisMaxHz: number,
+  logFrequency: boolean,
+  preserveGaps = false,
+): Float32Array {
+  if (logFrequency) {
+    return sampleLogFrequencySpectrum(
+      overlay.values,
+      overlay.sampleRate,
+      overlay.fftSize,
+      barCount,
+      plotMinHz,
+      axisMaxHz,
+      preserveGaps,
+    );
+  }
+  const lastOvBin = maxDisplayBin(overlay.sampleRate, overlay.fftSize);
+  const out = new Float32Array(barCount);
+  const span = axisMaxHz - plotMinHz;
+  for (let i = 0; i < barCount; i += 1) {
+    const t = barCount <= 1 ? 0 : i / (barCount - 1);
+    const hz = plotMinHz + t * span;
+    const bin = (hz * overlay.fftSize) / overlay.sampleRate;
+    out[i] =
+      bin >= lastOvBin
+        ? overlay.values[lastOvBin]
+        : sampleSpectrumAtBin(overlay.values, bin, preserveGaps);
+  }
+  return out;
+}
+
+function strokeSpectrumLine(
+  ctx: CanvasRenderingContext2D,
+  values: Float32Array,
+  plotLeft: number,
+  slotW: number,
+  barCount: number,
+  mapHeight: (db: number) => number,
+  plotBottom: number,
+  strokeStyle: string,
+  dbOffset = 0,
+  lineWidth = 1.8,
+) {
+  ctx.lineWidth = lineWidth;
+  ctx.lineJoin = "round";
+  ctx.lineCap = "round";
+  ctx.strokeStyle = strokeStyle;
+  ctx.beginPath();
+  let started = false;
+  for (let i = 0; i < barCount; i += 1) {
+    const db = values[i];
+    if (!Number.isFinite(db)) continue;
+    const h = mapHeight(db + dbOffset);
+    const x = plotLeft + i * slotW + slotW / 2;
+    const y = plotBottom - h;
+    if (!started) {
+      ctx.moveTo(x, y);
+      started = true;
+    } else {
+      ctx.lineTo(x, y);
+    }
+  }
+  if (started) ctx.stroke();
+}
+
 export function SpectrumChart({
   spectrum,
   peaks = [],
@@ -128,9 +217,12 @@ export function SpectrumChart({
   logFrequency = true,
   peakHold = false,
   overlaySpectrum = null,
+  accumulatedOverlaySpectrum = null,
   referenceLines,
   onRangeChange,
   onContextMenuFrequency,
+  captureWindow = null,
+  isRecordingActive = false,
 }: SpectrumChartProps) {
   const canvasRef = useRef<HTMLCanvasElement | null>(null);
   const containerRef = useRef<HTMLDivElement | null>(null);
@@ -139,10 +231,15 @@ export function SpectrumChart({
   const plotBoundsRef = useRef<PlotBounds | null>(null);
   const onRangeChangeRef = useRef(onRangeChange);
   const onContextMenuFrequencyRef = useRef(onContextMenuFrequency);
+  const drawRef = useRef<(() => void) | null>(null);
+  const captureWindowRef = useRef(captureWindow);
+  const isRecordingActiveRef = useRef(isRecordingActive);
 
   peakHoldEnabledRef.current = peakHold;
   onRangeChangeRef.current = onRangeChange;
   onContextMenuFrequencyRef.current = onContextMenuFrequency;
+  captureWindowRef.current = captureWindow;
+  isRecordingActiveRef.current = isRecordingActive;
 
   useEffect(() => {
     if (!peakHold) {
@@ -154,6 +251,22 @@ export function SpectrumChart({
   useEffect(() => {
     peakHoldRef.current = null;
   }, [minHz, maxHz]);
+
+  // Smooth capture sweep at display refresh rate (independent of spectrum UI throttle).
+  useEffect(() => {
+    if (!captureWindow && !isRecordingActive) {
+      return;
+    }
+    let rafId = 0;
+    const loop = () => {
+      drawRef.current?.();
+      if (captureWindowRef.current || isRecordingActiveRef.current) {
+        rafId = requestAnimationFrame(loop);
+      }
+    };
+    rafId = requestAnimationFrame(loop);
+    return () => cancelAnimationFrame(rafId);
+  }, [captureWindow, isRecordingActive]);
 
   useEffect(() => {
     const canvas = canvasRef.current;
@@ -521,58 +634,48 @@ export function SpectrumChart({
         }
       }
 
-      // Overlay: the captured max-hold spectrum from the latest detected ping,
-      // drawn as a line trace on top of the bars.
-      if (overlaySpectrum) {
-        const overlayValues = logFrequency
-          ? sampleLogFrequencySpectrum(
-              overlaySpectrum.values,
-              overlaySpectrum.sampleRate,
-              overlaySpectrum.fftSize,
-              barCount,
-              plotMinHz,
-              axisMaxHz,
-            )
-          : (() => {
-              const lastOvBin = maxDisplayBin(
-                overlaySpectrum.sampleRate,
-                overlaySpectrum.fftSize,
-              );
-              const out = new Float32Array(barCount);
-              const span = axisMaxHz - plotMinHz;
-              for (let i = 0; i < barCount; i += 1) {
-                const t = barCount <= 1 ? 0 : i / (barCount - 1);
-                const hz = plotMinHz + t * span;
-                const bin =
-                  (hz * overlaySpectrum.fftSize) / overlaySpectrum.sampleRate;
-                out[i] =
-                  bin >= lastOvBin
-                    ? overlaySpectrum.values[lastOvBin]
-                    : sampleSpectrumAtBin(overlaySpectrum.values, bin);
-              }
-              return out;
-            })();
+      // Overlay: max-hold (green) and accumulated power (red) from the latest
+      // detected ping, drawn as line traces on top of the live bars.
+      const drawLineOverlay = (
+        overlay: SpectrumData,
+        strokeStyle: string,
+        options?: {
+          dbOffset?: number;
+          lineWidth?: number;
+          preserveGaps?: boolean;
+        },
+      ) => {
+        const overlayValues = sampleOverlayForBars(
+          overlay,
+          barCount,
+          plotMinHz,
+          axisMaxHz,
+          logFrequency,
+          options?.preserveGaps ?? false,
+        );
+        strokeSpectrumLine(
+          ctx,
+          overlayValues,
+          plotLeft,
+          slotW,
+          barCount,
+          mapHeight,
+          plotBottom,
+          strokeStyle,
+          options?.dbOffset ?? 0,
+          options?.lineWidth ?? 1.8,
+        );
+      };
 
-        ctx.lineWidth = 1.8;
-        ctx.lineJoin = "round";
-        ctx.lineCap = "round";
-        ctx.strokeStyle = "hsla(142, 85%, 60%, 0.95)";
-        ctx.beginPath();
-        let started = false;
-        for (let i = 0; i < barCount; i += 1) {
-          const db = overlayValues[i];
-          if (!Number.isFinite(db)) continue;
-          const h = mapHeight(db);
-          const x = plotLeft + i * slotW + slotW / 2;
-          const y = plotBottom - h;
-          if (!started) {
-            ctx.moveTo(x, y);
-            started = true;
-          } else {
-            ctx.lineTo(x, y);
-          }
-        }
-        if (started) ctx.stroke();
+      if (overlaySpectrum) {
+        drawLineOverlay(overlaySpectrum, "hsla(142, 85%, 60%, 0.95)");
+      }
+      if (accumulatedOverlaySpectrum) {
+        drawLineOverlay(
+          accumulatedOverlaySpectrum,
+          "hsla(0, 90%, 62%, 0.98)",
+          { lineWidth: 2.2 },
+        );
       }
 
       ctx.fillStyle = "hsl(215 20% 60%)";
@@ -683,14 +786,42 @@ export function SpectrumChart({
         ctx.textBaseline = "alphabetic";
         ctx.fillText(title, plotLeft + 6, padding.top + 14);
       }
+
+      const activeCaptureWindow = captureWindowRef.current;
+      const captureRemaining =
+        activeCaptureWindow != null
+          ? captureRemainingFraction(activeCaptureWindow)
+          : null;
+
+      if (captureRemaining != null && captureRemaining > 0) {
+        const barH = 3;
+        const barY = padding.top + 4;
+        ctx.fillStyle = "hsla(142, 85%, 45%, 0.28)";
+        ctx.fillRect(plotLeft, barY, plotW, barH);
+        ctx.fillStyle = "hsl(142 92% 58%)";
+        ctx.fillRect(plotLeft, barY, plotW * captureRemaining, barH);
+      } else if (isRecordingActiveRef.current) {
+        const progressBarH = 4;
+        const progressY = padding.top + 4;
+        ctx.fillStyle = "hsla(38, 90%, 45%, 0.28)";
+        ctx.fillRect(plotLeft, progressY, plotW, progressBarH);
+        ctx.fillStyle = "hsl(38 95% 55%)";
+        ctx.fillRect(plotLeft, progressY, plotW, progressBarH);
+      }
     };
 
+    drawRef.current = draw;
     draw();
 
     const observer = new ResizeObserver(draw);
     observer.observe(container);
-    return () => observer.disconnect();
-  }, [spectrum, peaks, title, minDb, maxDb, displayBoostDb, minHz, maxHz, logFrequency, peakHold, overlaySpectrum, referenceLines]);
+    return () => {
+      observer.disconnect();
+      if (drawRef.current === draw) {
+        drawRef.current = null;
+      }
+    };
+  }, [spectrum, peaks, title, minDb, maxDb, displayBoostDb, minHz, maxHz, logFrequency, peakHold, overlaySpectrum, accumulatedOverlaySpectrum, referenceLines, captureWindow, isRecordingActive]);
 
   return (
     <div ref={containerRef} className="h-full min-h-[320px] w-full">

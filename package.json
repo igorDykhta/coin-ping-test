@@ -4,6 +4,7 @@
   "description": "Electron app for coin ping audio analysis and resonance matching.",
   "main": "dist-electron/electron/main.js",
   "scripts": {
+    "test": "node --test tests/*.test.cjs",
     "check-node": "node scripts/check-node.cjs",
     "dev": "yarn check-node && concurrently -k -s command-1 -n renderer,electron \"yarn dev:renderer\" \"yarn dev:electron\"",
     "dev:renderer": "vite --host 127.0.0.1 --port 5173 --strictPort",

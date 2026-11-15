@@ -20,6 +20,8 @@ import {
   createPingDetector,
   isDuplicatePing,
   type DetectedPing,
+  type PingCaptureOverlays,
+  type PingCaptureProgress,
   type PingDetector,
 } from "../lib/pingDetector";
 import type { ResonancePeak } from "../types/coinPing";
@@ -30,7 +32,43 @@ const AMBIENT_UI_INTERVAL_MS = 100;
 const MAX_RECORDING_MS = 60_000;
 const MAX_DETECTED_PINGS = 50;
 
+function cloneSpectrumData(spectrum: SpectrumData): SpectrumData {
+  return {
+    values: new Float32Array(spectrum.values),
+    sampleRate: spectrum.sampleRate,
+    fftSize: spectrum.fftSize,
+    ambientSubtracted: spectrum.ambientSubtracted,
+  };
+}
+
+function cloneCaptureOverlays(
+  overlays: PingCaptureOverlays,
+): PingCaptureOverlays {
+  return {
+    spectrum: cloneSpectrumData(overlays.spectrum),
+    accumulated: overlays.accumulated
+      ? cloneSpectrumData(overlays.accumulated)
+      : null,
+  };
+}
+
+function mergeCaptureOverlays(
+  spectrum: SpectrumData,
+  accumulated: SpectrumData | null | undefined,
+  fallback: PingCaptureOverlays | null,
+): PingCaptureOverlays {
+  return {
+    spectrum: cloneSpectrumData(spectrum),
+    accumulated: accumulated
+      ? cloneSpectrumData(accumulated)
+      : fallback?.accumulated
+        ? cloneSpectrumData(fallback.accumulated)
+        : null,
+  };
+}
+
 type AudioCaptureState = {
+  isStarting: boolean;
   isListening: boolean;
   isRecording: boolean;
   isCapturingAmbient: boolean;
@@ -42,6 +80,7 @@ type AudioCaptureState = {
 };
 
 const initialState: AudioCaptureState = {
+  isStarting: false,
   isListening: false,
   isRecording: false,
   isCapturingAmbient: false,
@@ -77,6 +116,7 @@ export function useAudioCapture(options: UseAudioCaptureOptions = {}) {
   const audioContextRef = useRef<AudioContext | null>(null);
   const analyserRef = useRef<AnalyserNode | null>(null);
   const streamRef = useRef<MediaStream | null>(null);
+  const startRequestRef = useRef<symbol | null>(null);
   const recorderRef = useRef<MediaRecorder | null>(null);
   const chunksRef = useRef<Blob[]>([]);
   const rafRef = useRef<number | null>(null);
@@ -97,6 +137,14 @@ export function useAudioCapture(options: UseAudioCaptureOptions = {}) {
   requestedFftSizeRef.current = requestedFftSize;
 
   const [detectedPings, setDetectedPings] = useState<DetectedPing[]>([]);
+  const [chartOverlays, setChartOverlays] = useState<PingCaptureOverlays | null>(
+    null,
+  );
+  const [pingCaptureProgress, setPingCaptureProgress] =
+    useState<PingCaptureProgress | null>(null);
+  const chartOverlaysRef = useRef<PingCaptureOverlays | null>(null);
+  /** When true, ignore stale detector snapshots until the next live capture. */
+  const overlaysLockedRef = useRef(false);
   const pingDetectorRef = useRef<PingDetector | null>(null);
   const pingDetectionEnabledRef = useRef(pingDetectionEnabled);
   pingDetectionEnabledRef.current = pingDetectionEnabled;
@@ -141,6 +189,7 @@ export function useAudioCapture(options: UseAudioCaptureOptions = {}) {
   }, [pingDetectionMinHz, pingDetectionMaxHz]);
 
   // Re-prime baseline whenever detection is toggled on, ambient changes, or FFT changes.
+  // Do not clear chart overlays here — zoom/FFT tweaks should not wipe the last ping trace.
   useEffect(() => {
     pingDetectorRef.current?.reset();
   }, [pingDetectionEnabled, requestedFftSize, ambientProfile]);
@@ -160,7 +209,10 @@ export function useAudioCapture(options: UseAudioCaptureOptions = {}) {
     liveValuesRef.current = new Float32Array(analyser.frequencyBinCount);
 
     const profile = ambientProfileRef.current;
-    if (profile && !isAmbientCompatible(profile, ctx.sampleRate, requestedFftSize)) {
+    if (
+      capturingAmbientRef.current ||
+      (profile && !isAmbientCompatible(profile, ctx.sampleRate, requestedFftSize))
+    ) {
       capturingAmbientRef.current = false;
       ambientSumRef.current = null;
       ambientFrameCountRef.current = 0;
@@ -178,6 +230,7 @@ export function useAudioCapture(options: UseAudioCaptureOptions = {}) {
   }, []);
 
   const cleanupStream = useCallback(() => {
+    startRequestRef.current = null;
     stopAnimation();
     capturingAmbientRef.current = false;
     streamRef.current?.getTracks().forEach((track) => {
@@ -213,7 +266,7 @@ export function useAudioCapture(options: UseAudioCaptureOptions = {}) {
       return;
     }
 
-    if (!analyser || !ctx || !sum || frames === 0) {
+    if (!analyser || !ctx || !sum || frames === 0 || sum.length !== analyser.frequencyBinCount) {
       setState((prev) => ({
         ...prev,
         isCapturingAmbient: false,
@@ -299,14 +352,66 @@ export function useAudioCapture(options: UseAudioCaptureOptions = {}) {
         !capturingAmbientRef.current &&
         pingDetectorRef.current
       ) {
-        const ping = pingDetectorRef.current.feed(
+        const detector = pingDetectorRef.current;
+        const ping = detector.feed(
           displayValues,
           ctx.sampleRate,
           analyser.fftSize,
           now,
           subtract,
         );
+
+        const maxHoldPreview = detector.getMaxHoldPreview();
+        const accumPreview = detector.getAccumulatedPreview();
+        const lastCapture = detector.getLastCaptureOverlays();
+
+        if (mountedRef.current) {
+          if (maxHoldPreview || accumPreview) {
+            overlaysLockedRef.current = false;
+            setChartOverlays((prev) => {
+              const fallback = prev ?? chartOverlaysRef.current;
+              const spectrum = maxHoldPreview
+                ? cloneSpectrumData(maxHoldPreview)
+                : fallback?.spectrum;
+              if (!spectrum) {
+                return prev;
+              }
+              const next: PingCaptureOverlays = {
+                spectrum,
+                accumulated: accumPreview
+                  ? cloneSpectrumData(accumPreview)
+                  : fallback?.accumulated ?? null,
+              };
+              chartOverlaysRef.current = next;
+              return next;
+            });
+          } else if (lastCapture && !overlaysLockedRef.current) {
+            setChartOverlays((prev) => {
+              const fallback = prev ?? chartOverlaysRef.current;
+              const next: PingCaptureOverlays = {
+                spectrum: cloneSpectrumData(lastCapture.spectrum),
+                accumulated: lastCapture.accumulated
+                  ? cloneSpectrumData(lastCapture.accumulated)
+                  : fallback?.accumulated ?? null,
+              };
+              chartOverlaysRef.current = next;
+              return next;
+            });
+          }
+        }
+
         if (ping && mountedRef.current) {
+          overlaysLockedRef.current = false;
+          const fallback = chartOverlaysRef.current;
+          const overlays = mergeCaptureOverlays(
+            ping.spectrum,
+            ping.accumulatedSpectrum ?? lastCapture?.accumulated ?? undefined,
+            fallback,
+          );
+          chartOverlaysRef.current = overlays;
+          setChartOverlays(overlays);
+          const storedAccumulated =
+            overlays.accumulated ?? ping.accumulatedSpectrum ?? null;
           setDetectedPings((prev) => {
             if (isDuplicatePing(ping, prev)) {
               return prev;
@@ -314,10 +419,23 @@ export function useAudioCapture(options: UseAudioCaptureOptions = {}) {
             const next = prev.length >= MAX_DETECTED_PINGS
               ? prev.slice(prev.length - MAX_DETECTED_PINGS + 1)
               : prev.slice();
-            next.push(ping);
+            next.push({
+              ...ping,
+              spectrum: cloneSpectrumData(ping.spectrum),
+              accumulatedSpectrum: storedAccumulated
+                ? cloneSpectrumData(storedAccumulated)
+                : null,
+            });
             return next;
           });
         }
+
+        if (mountedRef.current) {
+          const captureProgress = detector.getCaptureProgress(now);
+          setPingCaptureProgress(captureProgress);
+        }
+      } else if (mountedRef.current) {
+        setPingCaptureProgress((prev) => (prev === null ? null : null));
       }
 
       if (now - lastLiveUiUpdateRef.current >= LIVE_UI_INTERVAL_MS) {
@@ -356,19 +474,38 @@ export function useAudioCapture(options: UseAudioCaptureOptions = {}) {
   const stopRecordingRef = useRef<() => Promise<void>>(() => Promise.resolve());
 
   const startListening = useCallback(async () => {
-    setState((prev) => ({ ...prev, error: null }));
+    if (!mountedRef.current || startRequestRef.current || streamRef.current) {
+      return;
+    }
+
+    const request = Symbol("microphone request");
+    startRequestRef.current = request;
+    const isCurrentRequest = () =>
+      mountedRef.current && startRequestRef.current === request;
+    let stream: MediaStream | null = null;
+    let ctx: AudioContext | null = null;
+    let connected = false;
+    setState((prev) => ({ ...prev, isStarting: true, error: null }));
 
     try {
-      const stream = await navigator.mediaDevices.getUserMedia({
+      stream = await navigator.mediaDevices.getUserMedia({
         audio: {
           echoCancellation: false,
           noiseSuppression: false,
           autoGainControl: false,
         },
       });
+      if (!isCurrentRequest()) {
+        return;
+      }
 
-      const ctx = new AudioContext();
+      streamRef.current = stream;
+      ctx = new AudioContext();
+      audioContextRef.current = ctx;
       await ctx.resume();
+      if (!isCurrentRequest()) {
+        return;
+      }
 
       const source = ctx.createMediaStreamSource(stream);
       const gain = ctx.createGain();
@@ -384,11 +521,12 @@ export function useAudioCapture(options: UseAudioCaptureOptions = {}) {
 
       stream.getAudioTracks().forEach((track) => {
         track.onended = () => {
-          if (!mountedRef.current) {
+          if (!mountedRef.current || streamRef.current !== stream) {
             return;
           }
           setState((prev) => ({
             ...prev,
+            isStarting: false,
             isListening: false,
             isRecording: false,
             isCapturingAmbient: false,
@@ -400,8 +538,6 @@ export function useAudioCapture(options: UseAudioCaptureOptions = {}) {
         };
       });
 
-      streamRef.current = stream;
-      audioContextRef.current = ctx;
       analyserRef.current = analyser;
 
       if (
@@ -413,6 +549,8 @@ export function useAudioCapture(options: UseAudioCaptureOptions = {}) {
       }
 
       pingDetectorRef.current?.reset();
+      chartOverlaysRef.current = null;
+      setChartOverlays(null);
 
       setState((prev) => ({
         ...prev,
@@ -426,32 +564,63 @@ export function useAudioCapture(options: UseAudioCaptureOptions = {}) {
       }));
 
       startLiveLoop();
+      connected = true;
     } catch (captureError) {
-      cleanupStream();
-      await closeAudioContext();
-      setState((prev) => ({
-        ...prev,
-        error:
-          captureError instanceof Error
-            ? captureError.message
-            : "Microphone access was denied or unavailable.",
-      }));
+      if (isCurrentRequest()) {
+        stopAnimation();
+        setState((prev) => ({
+          ...prev,
+          isListening: false,
+          error:
+            captureError instanceof Error
+              ? captureError.message
+              : "Microphone access was denied or unavailable.",
+        }));
+      }
+    } finally {
+      if (startRequestRef.current === request) {
+        startRequestRef.current = null;
+        if (mountedRef.current) {
+          setState((prev) => ({ ...prev, isStarting: false }));
+        }
+      }
+      if (!connected) {
+        // Dispose only this request's resources; a newer request may own refs.
+        stream?.getTracks().forEach((track) => {
+          track.onended = null;
+          track.stop();
+        });
+        if (streamRef.current === stream) {
+          streamRef.current = null;
+        }
+        if (audioContextRef.current === ctx) {
+          audioContextRef.current = null;
+          analyserRef.current = null;
+        }
+        if (ctx && ctx.state !== "closed") {
+          await ctx.close();
+        }
+      }
     }
-  }, [ambientProfile, cleanupStream, closeAudioContext, startLiveLoop]);
+  }, [ambientProfile, cleanupStream, closeAudioContext, startLiveLoop, stopAnimation]);
 
   const stopListening = useCallback(async () => {
     capturingAmbientRef.current = false;
     pingDetectorRef.current?.reset();
+    chartOverlaysRef.current = null;
+    setChartOverlays(null);
+    setPingCaptureProgress(null);
     cleanupStream();
-    await closeAudioContext();
     setState((prev) => ({
       ...prev,
+      isStarting: false,
       isListening: false,
       isRecording: false,
       isCapturingAmbient: false,
       ambientProgress: 0,
       liveSpectrum: null,
     }));
+    await closeAudioContext();
   }, [cleanupStream, closeAudioContext]);
 
   const startAmbientCapture = useCallback(() => {
@@ -466,6 +635,8 @@ export function useAudioCapture(options: UseAudioCaptureOptions = {}) {
     ambientCaptureStartRef.current = performance.now();
     lastAmbientUiUpdateRef.current = 0;
     pingDetectorRef.current?.reset();
+    chartOverlaysRef.current = null;
+    setChartOverlays(null);
 
     setState((prev) => ({
       ...prev,
@@ -578,13 +749,31 @@ export function useAudioCapture(options: UseAudioCaptureOptions = {}) {
     }));
   }, []);
 
-  const clearDetectedPings = useCallback(() => {
-    setDetectedPings([]);
+  const clearChartOverlays = useCallback(() => {
+    overlaysLockedRef.current = true;
+    chartOverlaysRef.current = null;
+    setChartOverlays(null);
+    setPingCaptureProgress(null);
+    pingDetectorRef.current?.reset();
   }, []);
 
-  const dismissDetectedPing = useCallback((id: string) => {
-    setDetectedPings((prev) => prev.filter((p) => p.id !== id));
-  }, []);
+  const clearDetectedPings = useCallback(() => {
+    setDetectedPings([]);
+    clearChartOverlays();
+  }, [clearChartOverlays]);
+
+  const dismissDetectedPing = useCallback(
+    (id: string) => {
+      setDetectedPings((prev) => {
+        const next = prev.filter((p) => p.id !== id);
+        if (next.length === 0) {
+          clearChartOverlays();
+        }
+        return next;
+      });
+    },
+    [clearChartOverlays],
+  );
 
   /**
    * Append a user-defined peak. If any pings already exist, the peak is added
@@ -692,6 +881,8 @@ export function useAudioCapture(options: UseAudioCaptureOptions = {}) {
     stopRecording,
     clearRecording,
     detectedPings,
+    chartOverlays,
+    pingCaptureProgress,
     clearDetectedPings,
     dismissDetectedPing,
     addManualPeak,

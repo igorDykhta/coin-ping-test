@@ -30,6 +30,16 @@ Produces:
 - `dist/` — renderer bundle
 - `dist-electron/` — Electron main/preload
 
+## Check changes
+
+```bash
+yarn test
+yarn exec tsc --noEmit -p tsconfig.json
+yarn exec tsc --noEmit -p tsconfig.electron.json
+```
+
+The regression suite covers detector timing, microphone lifecycle with mocked browser APIs, ambient calibration, reference saving, and asset resolution for the built Electron page. It does not require microphone access. Verify hardware capture and desktop interactions separately when changing those paths.
+
 ## Database
 
 SQLite file (macOS):

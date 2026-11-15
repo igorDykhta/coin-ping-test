@@ -74,6 +74,7 @@ export function LiveSpectrumPanel({
   const detectionBandValid = detectionMaxHz > detectionMinHz;
 
   const {
+    isStarting,
     isListening,
     isRecording,
     isCapturingAmbient,
@@ -95,6 +96,8 @@ export function LiveSpectrumPanel({
     clearDetectedPings,
     dismissDetectedPing,
     addManualPeak,
+    chartOverlays,
+    pingCaptureProgress,
   } = useAudioCapture({
     fftSize: desiredFftSize,
     pingDetectionEnabled: pingDetectionEnabled && detectionBandValid,
@@ -106,6 +109,11 @@ export function LiveSpectrumPanel({
   // live chart as a line trace so the user can compare it with the now-decayed
   // live signal.
   const latestPing = detectedPings[detectedPings.length - 1] ?? null;
+
+  const chartOverlaySpectrum =
+    chartOverlays?.spectrum ?? latestPing?.spectrum ?? null;
+  const chartAccumulatedOverlay =
+    chartOverlays?.accumulated ?? latestPing?.accumulatedSpectrum ?? null;
 
   // Frequency under the cursor at the moment of right-click — captured by the
   // chart and consumed by the context-menu items below.
@@ -239,8 +247,11 @@ export function LiveSpectrumPanel({
         <CardTitle>Frequency spectrum</CardTitle>
         <div className="flex flex-wrap gap-2">
           {!isListening ? (
-            <Button type="button" onClick={() => void startListening()}>
-              Start listening
+            <Button
+              type="button"
+              onClick={() => void (isStarting ? stopListening() : startListening())}
+            >
+              {isStarting ? "Cancel microphone request" : "Start listening"}
             </Button>
           ) : (
             <>
@@ -338,26 +349,32 @@ export function LiveSpectrumPanel({
           </p>
         ) : null}
 
-        <p
-          className={cn(
-            "text-sm",
-            isRecording ? "text-amber-400" : "text-muted-foreground",
-          )}
-        >
-          {!isListening
-            ? "Start listening, capture ambient, then record coin pings."
-            : isCapturingAmbient
-              ? "Keep the room quiet for 10 seconds while we measure the noise floor per frequency."
-              : isRecording
-                ? "Recording… strike the coin, then stop to analyze the ping."
-                : recordingSpectrum
-                  ? `Showing spectrum for the last recording (${recordingPeaks.length} peaks detected).`
-                  : ambientProfile && subtractAmbientEnabled
-                    ? "Live view shows signal minus ambient floor; coin pings stand out above zero."
-                    : "Capture ambient first, then coin pings spike above the noise floor."}
-        </p>
+        {pingCaptureProgress ? null : (
+          <p
+            className={cn(
+              "text-sm",
+              isRecording ? "text-amber-400" : "text-muted-foreground",
+            )}
+          >
+            {!isListening
+              ? "Start listening, capture ambient, then record coin pings."
+              : isCapturingAmbient
+                ? "Keep the room quiet for 10 seconds while we measure the noise floor per frequency."
+                : isRecording
+                  ? "Recording… strike the coin, then stop to analyze the ping."
+                  : recordingSpectrum
+                    ? `Showing spectrum for the last recording (${recordingPeaks.length} peaks detected).`
+                    : ambientProfile && subtractAmbientEnabled
+                      ? latestPing || chartOverlaySpectrum || chartAccumulatedOverlay
+                        ? "Green = peak snapshot · red = time-averaged sustained resonance."
+                        : "Live view shows signal minus ambient floor; coin pings stand out above zero."
+                      : latestPing || chartOverlaySpectrum || chartAccumulatedOverlay
+                        ? "Green = peak snapshot · red = time-averaged sustained resonance."
+                        : "Capture ambient first, then coin pings spike above the noise floor."}
+          </p>
+        )}
 
-        <div className="min-h-0 flex-1 rounded-md border border-border bg-card">
+        <div className="relative min-h-0 flex-1 rounded-md border border-border bg-card">
           <ContextMenu
             onOpenChange={(open) => {
               if (!open) setContextMenuFrequency(null);
@@ -398,9 +415,21 @@ export function LiveSpectrumPanel({
                   logFrequency
                   peakHold={!recordingSpectrum}
                   overlaySpectrum={
-                    recordingSpectrum ? null : latestPing?.spectrum ?? null
+                    recordingSpectrum ? null : chartOverlaySpectrum
+                  }
+                  accumulatedOverlaySpectrum={
+                    recordingSpectrum ? null : chartAccumulatedOverlay
                   }
                   referenceLines={referenceLines}
+                  captureWindow={
+                    pingCaptureProgress
+                      ? {
+                          startedAtMs: pingCaptureProgress.startedAtMs,
+                          totalMs: pingCaptureProgress.totalMs,
+                        }
+                      : null
+                  }
+                  isRecordingActive={isRecording && !recordingSpectrum}
                 />
               </div>
             </ContextMenuTrigger>

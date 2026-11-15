@@ -171,11 +171,30 @@ export function maxDisplayHz(sampleRate: number, fftSize: number): number {
 }
 
 /** Interpolate dB at a fractional bin index. */
-export function sampleSpectrumAtBin(values: Float32Array, bin: number): number {
+export function sampleSpectrumAtBin(
+  values: Float32Array,
+  bin: number,
+  preserveGaps = false,
+): number {
   const lower = Math.floor(bin);
   const upper = Math.min(values.length - 1, lower + 1);
+  const vl = values[lower];
+  const vu = values[upper];
+  if (preserveGaps) {
+    const fl = Number.isFinite(vl);
+    const fu = Number.isFinite(vu);
+    if (!fl && !fu) {
+      return Number.NaN;
+    }
+    if (!fl) {
+      return vu;
+    }
+    if (!fu) {
+      return vl;
+    }
+  }
   const t = bin - lower;
-  return values[lower] * (1 - t) + values[upper] * t;
+  return vl * (1 - t) + vu * t;
 }
 
 /** Sample spectrum on a log-spaced frequency grid (more pixels for low Hz). */
@@ -186,6 +205,7 @@ export function sampleLogFrequencySpectrum(
   pointCount: number,
   minHz = MIN_DISPLAY_HZ,
   maxHz = MAX_DISPLAY_HZ,
+  preserveGaps = false,
 ): Float32Array {
   const lastBin = maxDisplayBin(sampleRate, fftSize);
   const effectiveMaxHz = Math.min(maxHz, binToFrequencyHz(lastBin, sampleRate, fftSize));
@@ -200,7 +220,7 @@ export function sampleLogFrequencySpectrum(
     if (bin >= lastBin) {
       samples[i] = values[lastBin];
     } else {
-      samples[i] = sampleSpectrumAtBin(values, bin);
+      samples[i] = sampleSpectrumAtBin(values, bin, preserveGaps);
     }
   }
 

@@ -6,7 +6,7 @@ Repo-specific guidance for developing and debugging this Electron application. R
 
 Coin Ping Analyzer captures microphone audio, displays frequency spectra, detects sustained coin resonances, compares them with saved references, and stores reference peak metadata in SQLite. Live detection, ambient calibration, recording analysis, matching, and reference saving are already implemented despite the README's "Planned features" list.
 
-The stack is React 19, TypeScript 6 with strict checking, Vite 8, Electron 41, Tailwind CSS 4, and `@sqlrooms/ui`. Use `package.json` and `yarn.lock` for dependency requirements. There is no backend HTTP service, configured test runner, lint script, CI workflow, or installer packaging script in this checkout.
+The stack is React 19, TypeScript 6 with strict checking, Vite 8, Electron 41, Tailwind CSS 4, and `@sqlrooms/ui`. Use `package.json` and `yarn.lock` for dependency requirements. Regression tests use Node's built-in test runner. There is no backend HTTP service, lint script, CI workflow, or installer packaging script in this checkout.
 
 Before editing, inspect `git status --short`, `git diff`, and `git diff --cached`; preserve existing staged and unstaged work. Edit source files rather than generated `dist/`, `dist-electron/`, or `node_modules/` content.
 
@@ -49,11 +49,12 @@ Install dependencies when needed; an existing usable `node_modules/` does not re
 | `yarn dev:electron` | Compiles Electron, waits for Vite, and launches with `VITE_DEV_SERVER_URL`. Requires a running renderer server. |
 | `yarn exec tsc --noEmit -p tsconfig.json` | Checks renderer and Vite-config types. |
 | `yarn exec tsc --noEmit -p tsconfig.electron.json` | Checks Electron, persistence, and shared types without emitting files. |
+| `yarn test` | Runs synthetic detector, mocked audio lifecycle, reference-saving, and production asset-path regressions. |
 | `yarn build` | Builds the renderer into `dist/` and Electron into `dist-electron/`. Does not run the renderer type check. |
 | `yarn build:renderer` / `yarn build:electron` | Builds the affected side independently. |
 | `yarn preview` | Serves the built renderer in a browser; does not launch Electron. |
 
-Electron main/preload changes require a rebuild and process restart; the dev script has no Electron TypeScript watcher. The launch script deliberately unsets `ELECTRON_RUN_AS_NODE`; preserve that behavior. Electron starts from `dist-electron/electron/main.js` and loads `dist/index.html` when no dev-server URL is supplied. A successful build creates bundles, not a distributable installer.
+Electron main/preload changes require a rebuild and process restart; the dev script has no Electron TypeScript watcher. The launch script deliberately unsets `ELECTRON_RUN_AS_NODE`; preserve that behavior. Electron starts from `dist-electron/electron/main.js` and loads `dist/index.html` when no dev-server URL is supplied. Keep Vite's relative `base: "./"` so assets resolve under `file://`. A successful build creates bundles, not a distributable installer.
 
 ## Process and persistence boundaries
 
@@ -64,7 +65,7 @@ Electron main/preload changes require a rebuild and process restart; the dev scr
 - The database path is `path.join(app.getPath("userData"), "coin-ping-test.sqlite")`; the README documents the usual macOS location. Use a temporary database for development checks rather than modifying the user's reference library.
 - The `reference_recordings` table contains `id`, `label`, `peaks_json`, and `created_at`. The DB enables WAL, uses parameterized statements, and checkpoints/closes on shutdown. Preserve existing rows when extending the schema; the current migration only creates the table if absent.
 - Reference creation requires a nonblank label, at least one peak, positive finite frequencies, and finite magnitudes. Keep validation at the persistence boundary as well as user-facing form checks; TypeScript types do not validate incoming IPC values.
-- Saved references contain peak metadata, not audio files or spectrum buffers. The current save dialog explicitly maps each peak to `{ frequencyHz, magnitude }`, dropping `kind`, `sustainMs`, and `accumulatedPowerDb`. A change to saved peak metadata must update this mapping and continue to support rows without optional fields.
+- Saved references contain peak metadata, not audio files or spectrum buffers. The save dialog preserves `frequencyHz`, `magnitude`, `kind`, `sustainMs`, and `accumulatedPowerDb`. Preserve classification so matching can prefer long peaks on both sides, while continuing to support older rows without optional fields.
 - The delete API exists, but the current reference sidebar has no delete control. Dismissing a detected ping only removes transient in-memory state.
 
 ## Audio and numerical contracts
@@ -73,19 +74,19 @@ The live pipeline is microphone → gain → analyser → optional ambient corre
 
 - `SpectrumData.values` contains per-bin dB values in a `Float32Array`, together with the spectrum's own `sampleRate`, `fftSize`, and optional ambient-subtraction flag. Frequency is `bin * sampleRate / fftSize`; do not assume every input is 48 kHz.
 - Clamp visible ranges using `clampFrequencyRange`: minimum 50 Hz, maximum `min(30_000, sampleRate / 2)`, and minimum span 100 Hz. Defaults are 500–30,000 Hz before clamping.
-- Default FFT size is 8192. `resolveFftSizeForSpan` increases it up to 32768 for narrow views below a 4000 Hz span. When FFT size changes, resize analysis buffers and invalidate incompatible ambient calibration. Retained captured spectra still use their original FFT and sample rate when drawn.
+- Default FFT size is 8192. `resolveFftSizeForSpan` increases it up to 32768 for narrow views below a 4000 Hz span. When FFT size changes, resize analysis buffers, cancel any active ambient capture, and invalidate incompatible calibration. Ambient profiles must contain `fftSize / 2` bins. Retained captured spectra still use their original FFT and sample rate when drawn.
 - Average, integrate, and subtract power in the linear domain (`10 ** (dB / 10)`), then convert back with `10 * log10`. Ambient capture lasts 5000 ms; subtraction removes 55% of measured ambient power while retaining at least 50% of raw signal power. Apply a profile only when both sample rate and FFT size match.
 - `LIVE_INPUT_GAIN` changes the signal entering analysis; `LIVE_DISPLAY_BOOST_DB` changes its display. Keep display boosts out of detector inputs and saved peak magnitudes.
 - Browser echo cancellation, noise suppression, and automatic gain control are disabled for analysis. Preserve that choice unless intentionally changing the audio model.
 - Reuse buffers in the live loop, then clone mutable arrays when retaining snapshots in React state or detected pings. Live spectrum state is throttled to 50 ms updates; ambient progress uses 100 ms updates. Do not assume overlay/progress updates share that throttle.
-- Stop media tracks, cancel animation frames, close AudioContexts, and release event handlers on shutdown/unmount. Preserve mounted-state guards and exercise repeated start/stop under React StrictMode.
+- Stop media tracks, cancel animation frames, close AudioContexts, and release event handlers on shutdown/unmount. Preserve the pending-start token and mounted-state guards: canceled requests must dispose their own resources without interfering with newer sessions. Exercise repeated start/stop under React StrictMode.
 - Manual recordings stop automatically at 60 seconds. Automatic ping history is capped at 50 entries; manual peaks append to the latest ping or create one when the list is empty.
 
 ## Detection and matching behavior
 
 Detection uses the visible frequency band with a default 4000 Hz lower floor. The low-frequency toggle removes that floor, and an empty detection band disables detection. Ambient capture suspends detector feeding.
 
-`createPingDetector` moves through idle → capturing → refractory. It triggers on band mean power above an adaptive baseline, captures a decaying max-hold spectrum, and accumulates sustained post-transient power. Current defaults:
+`createPingDetector` moves through idle → capturing → refractory. It triggers on band mean power above an adaptive baseline, retains per-bin capture maxima, and accumulates sustained post-transient power. A separate preview buffer decays for live display; never use that decaying buffer for peak magnitude or sustain classification. Current defaults:
 
 | Parameter | Value / interpretation |
 | --- | --- |
@@ -99,7 +100,7 @@ The accumulated spectrum integrates qualifying linear power over time and divide
 
 Duplicate detection compares `peaks[0]` with existing pings using `max(20 Hz, 0.5% of candidate frequency)`. Automatically emitted peaks are frequency-sorted, so this is the lowest-frequency retained peak, even though some comments call it the "top" peak. Check duplicate detection and default labels when changing peak ordering.
 
-Reference matching uses a different tolerance: `max(20 Hz, 1.5% of reference frequency)`. It prefers long peaks on each side when available, otherwise falls back to all peaks. The score is matched eligible reference peaks divided by eligible reference peaks, with a default minimum of 0.6; ties favor lower mean Hz error. Matching is reference coverage, allows one candidate peak to satisfy multiple reference peaks, and does not use magnitude as a distance metric. UI peak-count labels currently use the full reference count, which may differ from the scoring denominator for annotated references.
+Reference matching uses a different tolerance: `max(20 Hz, 1.5% of reference frequency)`. It prefers long peaks on each side when available, otherwise falls back to all peaks. The score is matched eligible reference peaks divided by eligible reference peaks, with a default minimum of 0.6; ties favor lower mean Hz error. Matching is reference coverage, allows one candidate peak to satisfy multiple reference peaks, and does not use magnitude as a distance metric. UI peak-count labels use `comparedRefPeakCount` from the matcher so the displayed ratio agrees with the score.
 
 ## Chart and UI constraints
 
@@ -114,7 +115,7 @@ Reference matching uses a different tolerance: `max(20 Hz, 1.5% of reference fre
 
 ## Verification for changes
 
-Choose checks for the affected behavior. For TypeScript changes, run the relevant type check above; run both for shared contracts. For build/configuration changes, also run `yarn build`. There is no `yarn test` or `yarn lint` script to rely on.
+Choose checks for the affected behavior. Run `yarn test` for the covered regression cases. For TypeScript changes, run the relevant type check above; run both for shared contracts. For build/configuration changes, also run `yarn build`. Tests transpile actual TypeScript sources and inject browser/hook boundaries; they do not replace hardware or Electron UI testing. There is no `yarn lint` script.
 
 For audio, rendering, or persistence changes, exercise the relevant cases in Electron:
 

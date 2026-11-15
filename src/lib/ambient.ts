@@ -67,7 +67,11 @@ export function isAmbientCompatible(
   sampleRate: number,
   fftSize: number,
 ): boolean {
-  return profile.sampleRate === sampleRate && profile.fftSize === fftSize;
+  return (
+    profile.sampleRate === sampleRate &&
+    profile.fftSize === fftSize &&
+    profile.values.length === fftSize / 2
+  );
 }
 
 /** Write excess-power spectrum into `out` (reused buffer — no per-frame allocation). */

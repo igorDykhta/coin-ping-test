@@ -17,9 +17,11 @@ const DEFAULT_MIN_SCORE = 0.6;
 
 export type ReferenceMatch = {
   reference: ReferenceRecord;
-  /** How many of `reference.peaks` were found in the candidate peaks. */
+  /** How many eligible reference peaks were found in the candidate peaks. */
   matchedRefPeakCount: number;
-  /** matchedRefPeakCount / reference.peaks.length, 0..1. */
+  /** Reference peaks considered after preferring long resonances. */
+  comparedRefPeakCount: number;
+  /** matchedRefPeakCount / comparedRefPeakCount, 0..1. */
   score: number;
   /** Average Hz error across matched peaks (lower is tighter). */
   avgErrorHz: number;
@@ -94,6 +96,7 @@ export function findMatchingReferences(
     results.push({
       reference,
       matchedRefPeakCount: matched,
+      comparedRefPeakCount: referencePeaks.length,
       score,
       avgErrorHz: matched === 0 ? Infinity : totalError / matched,
     });

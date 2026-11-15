@@ -12,6 +12,11 @@ export type ResonancePeak = {
   kind?: "long" | "short";
   /** Max consecutive sustain duration (ms) measured for this peak's bin. */
   sustainMs?: number;
+  /**
+   * Average dB power integrated after the initial transient window during
+   * ping capture. Used internally for ranking; absent for manual peaks.
+   */
+  accumulatedPowerDb?: number;
 };
 
 export type ReferenceInput = {

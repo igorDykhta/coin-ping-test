@@ -6,7 +6,9 @@ import { detectPeaks, type SpectrumData } from "./spectrum";
  *
  * Watches band-limited energy in dB; when current energy is `thresholdDb` above
  * a slow EWMA baseline it triggers, holds a max-per-bin snapshot for
- * `captureMs`, then refuses to re-trigger for `refractoryMs`.
+ * `captureMs`, integrates per-bin power after an initial delay, then refuses
+ * to re-trigger for `refractoryMs`. Peak ranking favors frequencies with high
+ * accumulated post-transient power so sustained resonances beat brief spikes.
  */
 
 export type PingDetectorConfig = {
@@ -31,12 +33,24 @@ export type PingDetectorConfig = {
    * this distance from its running max-hold value during capture.
    */
   sustainDropDb?: number;
+  /**
+   * After trigger, skip this many ms before integrating per-bin power. The
+   * initial transient is loud across many bins; delaying accumulation focuses
+   * on energy that keeps ringing and improves long-peak detection.
+   */
+  powerAccumDelayMs?: number;
 };
 
 export type DetectedPing = {
   id: string;
   detectedAt: string;
+  /** Max-hold spectrum captured during the ping window. */
   spectrum: SpectrumData;
+  /**
+   * Time-averaged power over the full capture window: ∫(standing power)·dt / T.
+   * Bins without standing resonance average to zero; ringing bins stay elevated.
+   */
+  accumulatedSpectrum?: SpectrumData | null;
   peaks: ResonancePeak[];
   ambientSubtracted: boolean;
   triggerBandDb: number;
@@ -46,12 +60,21 @@ export type DetectedPing = {
 };
 
 const DEFAULT_THRESHOLD_DB = 12;
-const DEFAULT_CAPTURE_MS = 500;
-const DEFAULT_REFRACTORY_MS = 800;
+/** Max-hold + power-integration window after trigger (ms). */
+const DEFAULT_CAPTURE_MS = 5000;
+/** Total no-retrigger window after trigger (ms). Must exceed captureMs. */
+const DEFAULT_REFRACTORY_MS = 5000;
 const DEFAULT_BASELINE_TC_MS = 800;
 const DEFAULT_MIN_TRIGGER_BAND_DB = -85;
 const DEFAULT_MIN_SUSTAIN_MS = 100;
 const DEFAULT_SUSTAIN_DROP_DB = 8;
+/** Ignore the first N ms of capture when integrating per-bin power. */
+const DEFAULT_POWER_ACCUM_DELAY_MS = 60;
+/** Red integration starts after this much continuous sustain (ms). */
+const ACCUM_START_SUSTAIN_MS = 250;
+/** Only the live preview decays when energy falls away (dB/s). */
+const PREVIEW_DECAY_DB_PER_SEC = 20;
+const MIN_LINEAR_POWER = 1e-12;
 
 /** Sustain (ms) at which a peak is upgraded from "short" to "long". */
 const LONG_PEAK_SUSTAIN_MS = 200;
@@ -65,6 +88,66 @@ const RAW_PEAK_LIMIT = 24;
 /** Maximum peaks kept on a single emitted ping. */
 const FINAL_PEAK_LIMIT = 6;
 
+/** Fractional Hz tolerance when merging peak lists. */
+const PEAK_MERGE_FRACTION = 0.005;
+const PEAK_MERGE_MIN_HZ = 20;
+
+function linearPowerFromDb(db: number): number {
+  if (!Number.isFinite(db)) return 0;
+  return 10 ** (db / 10);
+}
+
+function dbFromLinearPower(power: number): number {
+  return 10 * Math.log10(Math.max(power, MIN_LINEAR_POWER));
+}
+
+function peaksWithinTolerance(
+  frequencyHz: number,
+  others: readonly ResonancePeak[],
+): boolean {
+  const tolerance = Math.max(
+    PEAK_MERGE_MIN_HZ,
+    frequencyHz * PEAK_MERGE_FRACTION,
+  );
+  return others.some(
+    (peak) => Math.abs(peak.frequencyHz - frequencyHz) <= tolerance,
+  );
+}
+
+export type PingCaptureOverlays = {
+  spectrum: SpectrumData;
+  accumulated: SpectrumData | null;
+};
+
+function cloneSpectrumData(spectrum: SpectrumData): SpectrumData {
+  return {
+    values: new Float32Array(spectrum.values),
+    sampleRate: spectrum.sampleRate,
+    fftSize: spectrum.fftSize,
+    ambientSubtracted: spectrum.ambientSubtracted,
+  };
+}
+
+function buildAccumulatedSpectrum(
+  delayedAccum: Float32Array,
+  windowMs: number,
+  sampleRate: number,
+  fftSize: number,
+  ambientSubtracted: boolean,
+): SpectrumData {
+  const accumValues = new Float32Array(delayedAccum.length);
+  const w = Math.max(1, windowMs);
+  for (let i = 0; i < delayedAccum.length; i += 1) {
+    // Same elapsed time T for every bin: no standing power → ∫0/T → chart floor.
+    accumValues[i] = dbFromLinearPower(delayedAccum[i] / w);
+  }
+  return {
+    values: accumValues,
+    sampleRate,
+    fftSize,
+    ambientSubtracted,
+  };
+}
 /** Absolute Hz tolerance below which the fractional tolerance is ignored. */
 const DUPLICATE_PING_MIN_HZ_TOLERANCE = 20;
 /** Fractional Hz tolerance (0.5% of the top peak frequency). */
@@ -97,6 +180,15 @@ export function isDuplicatePing(
 
 type DetectorState = "idle" | "capturing" | "refractory";
 
+export type PingCaptureProgress = {
+  /** Fraction of the capture window still remaining (1 → 0). */
+  remaining: number;
+  elapsedMs: number;
+  totalMs: number;
+  /** `performance.now()` when the capture window opened. */
+  startedAtMs: number;
+};
+
 export type PingDetector = {
   setConfig(next: Partial<PingDetectorConfig>): void;
   reset(): void;
@@ -108,6 +200,21 @@ export type PingDetector = {
     nowMs: number,
     ambientSubtracted: boolean,
   ): DetectedPing | null;
+  /**
+   * While capturing, returns the in-progress post-transient power spectrum for
+   * live chart overlay. Null when idle or refractory.
+   */
+  getAccumulatedPreview(): SpectrumData | null;
+  /**
+   * While capturing, returns the in-progress max-hold spectrum for live overlay.
+   */
+  getMaxHoldPreview(): SpectrumData | null;
+  /**
+   * Spectra from the most recent capture window (even if no ping was emitted).
+   */
+  getLastCaptureOverlays(): PingCaptureOverlays | null;
+  /** Progress while a ping capture window is open; null when idle/refractory. */
+  getCaptureProgress(nowMs: number): PingCaptureProgress | null;
 };
 
 export function createPingDetector(initial: PingDetectorConfig): PingDetector {
@@ -121,6 +228,7 @@ export function createPingDetector(initial: PingDetectorConfig): PingDetector {
     minTriggerBandDb: initial.minTriggerBandDb ?? DEFAULT_MIN_TRIGGER_BAND_DB,
     minSustainMs: initial.minSustainMs ?? DEFAULT_MIN_SUSTAIN_MS,
     sustainDropDb: initial.sustainDropDb ?? DEFAULT_SUSTAIN_DROP_DB,
+    powerAccumDelayMs: initial.powerAccumDelayMs ?? DEFAULT_POWER_ACCUM_DELAY_MS,
   };
 
   let state: DetectorState = "idle";
@@ -129,12 +237,18 @@ export function createPingDetector(initial: PingDetectorConfig): PingDetector {
   let lastFrameMs = 0;
   let triggerStartMs = 0;
   let maxHold: Float32Array | null = null;
+  let previewHold: Float32Array | null = null;
   let currentSustainMs: Float32Array | null = null;
   let maxSustainMs: Float32Array | null = null;
+  /** Per-bin ∫ linear power·dt (only while standing resonance). */
+  let delayedPowerAccum: Float32Array | null = null;
+  /** Elapsed ms in the post-delay window (shared denominator for all bins). */
+  let delayedAccumWindowMs = 0;
   let triggerSampleRate = 0;
   let triggerFftSize = 0;
   let triggerAmbientSubtracted = false;
   let triggerBandDb = 0;
+  let lastCaptureOverlays: PingCaptureOverlays | null = null;
 
   function reset() {
     state = "idle";
@@ -143,8 +257,12 @@ export function createPingDetector(initial: PingDetectorConfig): PingDetector {
     lastFrameMs = 0;
     triggerStartMs = 0;
     maxHold = null;
+    previewHold = null;
     currentSustainMs = null;
     maxSustainMs = null;
+    delayedPowerAccum = null;
+    delayedAccumWindowMs = 0;
+    lastCaptureOverlays = null;
   }
 
   function setConfig(next: Partial<PingDetectorConfig>) {
@@ -181,13 +299,97 @@ export function createPingDetector(initial: PingDetectorConfig): PingDetector {
     return 10 * Math.log10(powerSum / count);
   }
 
+  function ensureCaptureBuffers(values: Float32Array) {
+    const len = values.length;
+    if (maxHold && maxHold.length === len) {
+      return;
+    }
+
+    const prevHold = maxHold;
+    const prevPreview = previewHold;
+    const prevCur = currentSustainMs;
+    const prevMax = maxSustainMs;
+    const prevAccum = delayedPowerAccum;
+    const prevWindowMs = delayedAccumWindowMs;
+
+    maxHold = new Float32Array(len);
+    maxHold.set(values);
+    previewHold = new Float32Array(values);
+    if (prevHold) {
+      const copyLen = Math.min(prevHold.length, len);
+      for (let i = 0; i < copyLen; i += 1) {
+        maxHold[i] = Math.max(maxHold[i], prevHold[i]);
+        previewHold[i] = Math.max(previewHold[i], prevPreview?.[i] ?? prevHold[i]);
+      }
+    }
+
+    currentSustainMs = new Float32Array(len);
+    maxSustainMs = new Float32Array(len);
+    delayedPowerAccum = new Float32Array(len);
+    delayedAccumWindowMs = prevWindowMs;
+    if (prevCur && prevMax && prevAccum) {
+      const copyLen = Math.min(prevCur.length, len);
+      currentSustainMs.set(prevCur.subarray(0, copyLen));
+      maxSustainMs.set(prevMax.subarray(0, copyLen));
+      delayedPowerAccum.set(prevAccum.subarray(0, copyLen));
+    }
+  }
+
+  function getAccumulatedPreview(): SpectrumData | null {
+    if (
+      state !== "capturing" ||
+      !delayedPowerAccum ||
+      delayedAccumWindowMs < 1
+    ) {
+      return null;
+    }
+    return buildAccumulatedSpectrum(
+      delayedPowerAccum,
+      delayedAccumWindowMs,
+      triggerSampleRate,
+      triggerFftSize,
+      triggerAmbientSubtracted,
+    );
+  }
+
+  function getMaxHoldPreview(): SpectrumData | null {
+    if (state !== "capturing" || !previewHold) {
+      return null;
+    }
+    return {
+      values: new Float32Array(previewHold),
+      sampleRate: triggerSampleRate,
+      fftSize: triggerFftSize,
+      ambientSubtracted: triggerAmbientSubtracted,
+    };
+  }
+
+  function getLastCaptureOverlays(): PingCaptureOverlays | null {
+    return lastCaptureOverlays;
+  }
+
+  function getCaptureProgress(nowMs: number): PingCaptureProgress | null {
+    if (state !== "capturing") {
+      return null;
+    }
+    const totalMs = config.captureMs;
+    const elapsedMs = Math.max(0, Math.min(totalMs, nowMs - triggerStartMs));
+    const remaining = Math.max(0, 1 - elapsedMs / totalMs);
+    return { remaining, elapsedMs, totalMs, startedAtMs: triggerStartMs };
+  }
+
   function emitPing(): DetectedPing | null {
     if (!maxHold || !maxSustainMs) return null;
     const held = maxHold;
     const sustain = maxSustainMs;
+    const delayedAccum = delayedPowerAccum;
+    const accumWindowMs = Math.max(1, delayedAccumWindowMs);
     maxHold = null;
+    previewHold = null;
     maxSustainMs = null;
     currentSustainMs = null;
+    delayedPowerAccum = null;
+    delayedAccumWindowMs = 0;
 
     const heldSpectrum: SpectrumData = {
       values: held,
@@ -195,24 +397,67 @@ export function createPingDetector(initial: PingDetectorConfig): PingDetector {
       fftSize: triggerFftSize,
       ambientSubtracted: triggerAmbientSubtracted,
     };
-    const rawPeaks = detectPeaks(heldSpectrum, {
+    const minDb = triggerAmbientSubtracted ? -30 : -55;
+    const peakOptions = {
       minHz: config.minHz,
       maxHz: config.maxHz,
-      minDb: triggerAmbientSubtracted ? -30 : -55,
+      minDb,
       maxPeaks: RAW_PEAK_LIMIT,
-    });
+    };
 
-    // Annotate every candidate with its bin's measured sustain duration and
-    // classify it as "long" (≥ LONG_PEAK_SUSTAIN_MS) vs "short".
-    const annotated = rawPeaks.map((peak) => {
-      const bin = Math.round(
-        (peak.frequencyHz * triggerFftSize) / triggerSampleRate,
+    const holdPeaks = detectPeaks(heldSpectrum, peakOptions);
+
+    // Build a spectrum from time-averaged power after the initial transient.
+    // Sustained resonances keep integrating energy; brief spikes do not.
+    let accumulatedSpectrum: SpectrumData | null = null;
+    let rawPeaks = holdPeaks;
+    if (delayedAccum && accumWindowMs >= 1) {
+      accumulatedSpectrum = buildAccumulatedSpectrum(
+        delayedAccum,
+        accumWindowMs,
+        triggerSampleRate,
+        triggerFftSize,
+        triggerAmbientSubtracted,
       );
-      const sustainMs =
-        bin >= 0 && bin < sustain.length ? sustain[bin] : 0;
+      const accumPeaks = detectPeaks(accumulatedSpectrum, peakOptions);
+      rawPeaks = [...accumPeaks];
+      for (const holdPeak of holdPeaks) {
+        if (!peaksWithinTolerance(holdPeak.frequencyHz, rawPeaks)) {
+          rawPeaks.push(holdPeak);
+        }
+      }
+    }
+
+    lastCaptureOverlays = {
+      spectrum: cloneSpectrumData(heldSpectrum),
+      accumulated: accumulatedSpectrum
+        ? cloneSpectrumData(accumulatedSpectrum)
+        : null,
+    };
+
+    const binForHz = (frequencyHz: number) =>
+      Math.round((frequencyHz * triggerFftSize) / triggerSampleRate);
+
+    const accumulatedDbForBin = (bin: number): number | undefined => {
+      if (!delayedAccum || bin < 0 || bin >= delayedAccum.length || delayedAccum[bin] <= 0) {
+        return undefined;
+      }
+      return dbFromLinearPower(delayedAccum[bin] / accumWindowMs);
+    };
+
+    // Annotate every candidate with sustain, kind, max-hold magnitude, and
+    // delayed power average used for ranking long resonances.
+    const annotated = rawPeaks.map((peak) => {
+      const bin = binForHz(peak.frequencyHz);
+      const sustainMs = bin >= 0 && bin < sustain.length ? sustain[bin] : 0;
       const kind: "long" | "short" =
         sustainMs >= LONG_PEAK_SUSTAIN_MS ? "long" : "short";
-      return { ...peak, sustainMs, kind };
+      const magnitude =
+        bin >= 0 && bin < held.length && Number.isFinite(held[bin])
+          ? held[bin]
+          : peak.magnitude;
+      const accumulatedPowerDb = accumulatedDbForBin(bin);
+      return { ...peak, magnitude, sustainMs, kind, accumulatedPowerDb };
     });
 
     // Drop fast transients (clicks, scrapes) — anything that didn't last
@@ -224,13 +469,13 @@ export function createPingDetector(initial: PingDetectorConfig): PingDetector {
       return null;
     }
 
-    // Rank by magnitude with a fixed dB bonus for long peaks, so a clearly
-    // ringing tone wins over a slightly louder but transient peak.
-    const ranked = [...sustained].sort((a, b) => {
-      const scoreA = a.magnitude + (a.kind === "long" ? LONG_PEAK_BONUS_DB : 0);
-      const scoreB = b.magnitude + (b.kind === "long" ? LONG_PEAK_BONUS_DB : 0);
-      return scoreB - scoreA;
-    });
+    // Rank by delayed accumulated power when available, with a fixed dB bonus
+    // for long peaks so clearly ringing tones beat transient spikes.
+    const peakScore = (p: (typeof sustained)[number]) => {
+      const base = p.accumulatedPowerDb ?? p.magnitude;
+      return base + (p.kind === "long" ? LONG_PEAK_BONUS_DB : 0);
+    };
+    const ranked = [...sustained].sort((a, b) => peakScore(b) - peakScore(a));
 
     const finalPeaks = ranked
       .slice(0, FINAL_PEAK_LIMIT)
@@ -239,13 +484,14 @@ export function createPingDetector(initial: PingDetectorConfig): PingDetector {
     // Top peak sustain = longest sustain seen across the kept peaks.
     let topPeakSustainMs = 0;
     for (const p of finalPeaks) {
-      if (p.sustainMs > topPeakSustainMs) topPeakSustainMs = p.sustainMs;
+      if ((p.sustainMs ?? 0) > topPeakSustainMs) topPeakSustainMs = p.sustainMs ?? 0;
     }
 
     return {
       id: `ping-${Date.now()}-${Math.random().toString(36).slice(2, 7)}`,
       detectedAt: new Date().toISOString(),
       spectrum: heldSpectrum,
+      accumulatedSpectrum,
       peaks: finalPeaks,
       ambientSubtracted: triggerAmbientSubtracted,
       triggerBandDb,
@@ -265,12 +511,8 @@ export function createPingDetector(initial: PingDetectorConfig): PingDetector {
     lastFrameMs = nowMs;
 
     if (state === "capturing") {
-      if (
-        maxHold &&
-        currentSustainMs &&
-        maxSustainMs &&
-        maxHold.length === values.length
-      ) {
+      ensureCaptureBuffers(values);
+      if (maxHold && previewHold && currentSustainMs && maxSustainMs && delayedPowerAccum) {
         const minBin = Math.max(
           1,
           Math.floor((config.minHz * triggerFftSize) / triggerSampleRate),
@@ -280,19 +522,56 @@ export function createPingDetector(initial: PingDetectorConfig): PingDetector {
           Math.ceil((config.maxHz * triggerFftSize) / triggerSampleRate),
         );
         const drop = config.sustainDropDb;
+        const inDelayedPhase =
+          nowMs - triggerStartMs >= config.powerAccumDelayMs;
+        const minAccumDb = triggerAmbientSubtracted ? -28 : -48;
+
+        if (dt > 0 && inDelayedPhase) {
+          delayedAccumWindowMs += dt;
+        }
+
         for (let i = minBin; i <= maxBin; i += 1) {
           const v = values[i];
-          if (v > maxHold[i]) {
+          if (Number.isFinite(v) && v > maxHold[i]) {
             maxHold[i] = v;
           }
-          // Sustain: bin stays within `drop` dB of its running peak.
-          if (Number.isFinite(v) && v >= maxHold[i] - drop) {
+          // Keep capture maxima for peak extraction and sustain measurement.
+          // Decaying those maxima would erase short tones and count quiet tails.
+          if (Number.isFinite(v) && v > previewHold[i]) {
+            previewHold[i] = v;
+          } else if (
+            dt > 0 &&
+            Number.isFinite(v) &&
+            v < previewHold[i] - drop
+          ) {
+            previewHold[i] -= PREVIEW_DECAY_DB_PER_SEC * (dt / 1000);
+            if (v > previewHold[i]) {
+              previewHold[i] = v;
+            }
+          }
+
+          const sustaining =
+            Number.isFinite(v) && v >= maxHold[i] - drop;
+          if (sustaining) {
             currentSustainMs[i] += dt;
             if (currentSustainMs[i] > maxSustainMs[i]) {
               maxSustainMs[i] = currentSustainMs[i];
             }
           } else {
             currentSustainMs[i] = 0;
+          }
+
+          // Measure sustain against the captured per-bin maximum, independently
+          // of the decaying preview and the loudest peak elsewhere in the band.
+          const standing =
+            sustaining &&
+            v >= minAccumDb &&
+            currentSustainMs[i] >= ACCUM_START_SUSTAIN_MS;
+          if (dt > 0 && inDelayedPhase && standing) {
+            const linear = linearPowerFromDb(v);
+            if (linear > 0) {
+              delayedPowerAccum[i] += linear * dt;
+            }
           }
         }
       }
@@ -331,8 +610,11 @@ export function createPingDetector(initial: PingDetectorConfig): PingDetector {
       triggerBandDb = bandDb;
       maxHold = new Float32Array(values.length);
       maxHold.set(values);
+      previewHold = new Float32Array(values);
       currentSustainMs = new Float32Array(values.length);
       maxSustainMs = new Float32Array(values.length);
+      delayedPowerAccum = new Float32Array(values.length);
+      delayedAccumWindowMs = 0;
       state = "capturing";
       return null;
     }
@@ -347,5 +629,13 @@ export function createPingDetector(initial: PingDetectorConfig): PingDetector {
     return null;
   }
 
-  return { setConfig, reset, feed };
+  return {
+    setConfig,
+    reset,
+    feed,
+    getAccumulatedPreview,
+    getMaxHoldPreview,
+    getLastCaptureOverlays,
+    getCaptureProgress,
+  };
 }

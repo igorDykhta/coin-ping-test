@@ -219,7 +219,7 @@ function MatchBanner({ matches }: { matches: ReferenceMatch[] }) {
         <span className="mr-1">✓ Match:</span>
         <span className="text-emerald-100">{best.reference.label}</span>{" "}
         <span className="text-emerald-300/80">
-          ({best.matchedRefPeakCount}/{best.reference.peaks.length} peaks ·{" "}
+          ({best.matchedRefPeakCount}/{best.comparedRefPeakCount} peaks ·{" "}
           {Math.round(best.score * 100)}% · ±{Math.round(best.avgErrorHz)} Hz)
         </span>
       </div>
@@ -274,6 +274,9 @@ function SavePingDialog({ ping, onClose, onSaved }: SavePingDialogProps) {
         peaks: ping.peaks.map((p) => ({
           frequencyHz: p.frequencyHz,
           magnitude: p.magnitude,
+          kind: p.kind,
+          sustainMs: p.sustainMs,
+          accumulatedPowerDb: p.accumulatedPowerDb,
         })),
       });
       onSaved(ping.id);
