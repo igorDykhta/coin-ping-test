@@ -12,6 +12,7 @@ type FrequencyRangeControlsProps = {
   minHz: number;
   maxHz: number;
   nyquistHz: number;
+  isRecordingView?: boolean;
   onApply: (minHz: number, maxHz: number) => void;
   onReset: () => void;
 };
@@ -37,6 +38,7 @@ export function FrequencyRangeControls({
   minHz,
   maxHz,
   nyquistHz,
+  isRecordingView = false,
   onApply,
   onReset,
 }: FrequencyRangeControlsProps) {
@@ -109,7 +111,7 @@ export function FrequencyRangeControls({
       </Button>
       <p className="w-full text-xs text-muted-foreground">
         X axis: {Math.round(minHz)}–{Math.round(maxHz)} Hz. Changing range or Reset clears ambient.
-        Mic limit ~{" "}
+        {isRecordingView ? "Recording limit" : "Mic limit"} ~{" "}
         {Math.round(maxCap)} Hz. Use{" "}
         <span className="font-mono">4700</span> or <span className="font-mono">4.7k</span>.
       </p>

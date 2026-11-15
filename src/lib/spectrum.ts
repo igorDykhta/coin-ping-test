@@ -1,4 +1,4 @@
-import type { ResonancePeak } from "../types/coinPing";
+import type { MeasuredResonancePeak } from "../types/coinPing";
 
 /** Default live FFT (~6 Hz/bin at 48 kHz). */
 export const FFT_SIZE = 8192;
@@ -337,7 +337,7 @@ export function detectPeaks(
     minHz?: number;
     maxHz?: number;
   } = {},
-): ResonancePeak[] {
+): MeasuredResonancePeak[] {
   const {
     maxPeaks = 8,
     minDb = -70,
@@ -350,7 +350,7 @@ export function detectPeaks(
   const lastBin = maxDisplayBin(sampleRate, fftSize);
   const minBin = Math.max(1, frequencyToBin(viewMin, sampleRate, fftSize));
   const maxBin = Math.min(lastBin, frequencyToBin(viewMax, sampleRate, fftSize));
-  const candidates: ResonancePeak[] = [];
+  const candidates: MeasuredResonancePeak[] = [];
 
   for (let i = minBin; i <= maxBin; i += 1) {
     const magnitude = values[i];
@@ -368,7 +368,7 @@ export function detectPeaks(
 
   candidates.sort((a, b) => b.magnitude - a.magnitude);
 
-  const peaks: ResonancePeak[] = [];
+  const peaks: MeasuredResonancePeak[] = [];
   for (const candidate of candidates) {
     const tooClose = peaks.some(
       (peak) =>

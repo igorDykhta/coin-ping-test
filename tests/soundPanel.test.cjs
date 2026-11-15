@@ -32,11 +32,12 @@ function panelHarness(initial = {}) {
     ...initial,
   };
   let detection;
+  let captureOptions;
   const props = { onDetectedPingsChange(state) { detection = state; } };
   const load = createLoader({
     react,
     "@sqlrooms/ui": { ...ui, cn: (...args) => args.filter(Boolean).join(" ") },
-    "../hooks/useAudioCapture": { useAudioCapture: () => model },
+    "../hooks/useAudioCapture": { useAudioCapture: (options) => { captureOptions = options; return model; } },
     "../hooks/useFrequencyRange": { useFrequencyRange: () => range },
     "./AmbientControls": { AmbientControls: "AmbientControls" },
     "./FrequencyRangeControls": { FrequencyRangeControls: "FrequencyRangeControls" },
@@ -47,6 +48,7 @@ function panelHarness(initial = {}) {
   return {
     render, model, range, peaks,
     get detection() { return detection; },
+    get captureOptions() { return captureOptions; },
     button(label) {
       return find(render(), (node) => node.type === "Button" && node.props.children === label);
     },
@@ -84,6 +86,47 @@ test("adjusting the displayed frequency range retains the completed recording id
   app.render();
   assert.equal(app.detection.manualRecording, undefined);
   assert.equal(app.button("Clear recording"), undefined);
+});
+
+test("restarting listening shows the new input without losing the retained recording or its frequency range", () => {
+  const values = new Float32Array(4096).fill(-110);
+  values[1024] = -30;
+  values[2048] = -35;
+  const recordingSpectrum = { values, sampleRate: 48_000, fftSize: 8192 };
+  const recordingIdentity = { id: "recording-1", capturedAt: "2026-01-01T10:00:00.000Z" };
+  const newInput = { values: new Float32Array(4096), sampleRate: 16_000, fftSize: 8192 };
+  const app = panelHarness({ recordingSpectrum, recordingIdentity });
+  app.model.startListening = () => {
+    app.model.isListening = true;
+    app.model.liveSpectrum = newInput;
+  };
+  const chart = () => find(app.render(), (node) => node.type === "SpectrumChart").props;
+  const range = () => find(app.render(), (node) => node.type === "FrequencyRangeControls").props;
+
+  assert.equal(chart().spectrum, recordingSpectrum);
+  assert.equal(range().nyquistHz, 24_000);
+  app.button("Start listening").props.onClick();
+  assert.equal(chart().spectrum, newInput);
+  assert.equal(range().nyquistHz, 8_000);
+  assert.equal(chart().maxHz, 8_000);
+  assert.equal(typeof chart().onRangeChange, "function");
+  assert.equal(app.captureOptions.pingDetectionMaxHz, 8_000);
+  assert.equal(app.detection.manualRecording.id, recordingIdentity.id);
+  assert.deepEqual(app.detection.manualRecording.peaks.map((peak) => peak.frequencyHz), [6_000, 12_000]);
+
+  app.button("Show recording").props.onClick();
+  assert.equal(chart().spectrum, recordingSpectrum);
+  assert.equal(range().nyquistHz, 24_000);
+  assert.equal(chart().maxHz, 24_000);
+  assert.equal(app.captureOptions.pingDetectionMaxHz, 8_000);
+  app.button("Show live spectrum").props.onClick();
+  assert.equal(chart().spectrum, newInput);
+
+  const nextSpectrum = { ...recordingSpectrum, sampleRate: 16_000 };
+  app.model.recordingSpectrum = nextSpectrum;
+  app.model.recordingIdentity = { ...recordingIdentity, id: "recording-2" };
+  assert.equal(chart().spectrum, nextSpectrum);
+  assert.equal(app.detection.manualRecording.id, "recording-2");
 });
 
 test("manual peak entry validates the frequency and accepts keyboard submission", () => {

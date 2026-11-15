@@ -211,6 +211,12 @@ async function workflows(win) {
   await ui.text("Manual recording");
   await ui.click("Start listening");
   await ui.text("Manual recording");
+  await ui.until("live plot after restarting the microphone", () =>
+    document.querySelector('[aria-label="Live spectrum"] canvas')?.getClientRects().length > 0);
+  await ui.click("Show recording");
+  await ui.until("the previous take is still available", () =>
+    document.querySelector('[aria-label="Recording spectrum"] canvas')?.getClientRects().length > 0);
+  await ui.click("Show live spectrum");
   await ui.click("Clear recording");
   await ui.until("the completed take is cleared", () => !document.body.innerText.includes("Manual recording"));
   await ui.click("Stop");
@@ -218,9 +224,18 @@ async function workflows(win) {
   await ui.field("Peak frequency (Hz)", "5500", 'section[aria-label="Sound analysis"]');
   await ui.click("Add peak", 'section[aria-label="Sound analysis"]');
   await ui.text("5500 Hz");
+  await ui.click("Save test result");
+  await ui.text("Test result saved");
+  const manualPeak = await ui.call(async (id) => {
+    const detail = await window.coinCatalogApi.getCoin(id);
+    return detail.sessions[0].soundResults.flatMap((result) => result.peaks)
+      .find((peak) => peak.frequencyHz === 5500 && peak.source === "manual");
+  }, coinId);
+  assert.deepEqual(manualPeak, { frequencyHz: 5500, kind: "long", source: "manual" });
 
   await ui.click("Catalog");
   await ui.field("Search coins", "Silv");
+  await ui.field("Country", "United Kingdom");
   await ui.text("1 coin");
   await ui.until("the filtered catalog card", () => {
     const tile = document.querySelector('button[aria-label="Open Silver Crown"]');
@@ -230,8 +245,16 @@ async function workflows(win) {
   });
   await ui.text("Within range");
   await ui.text("Sound results");
+  await ui.click("Edit details");
+  await ui.field("Country or issuer", "Canada");
+  await ui.click("Save details");
+  await ui.text("Canada");
   await ui.click("← Coin catalog");
   await ui.until("catalog search survives opening a card", () => document.querySelector('input[type="search"]')?.value === "Silv");
+  await ui.until("the unavailable country filter is cleared and the edited coin is visible", () => {
+    const country = [...document.querySelectorAll("label")].find((label) => label.textContent.trim() === "Country");
+    return country?.control?.value === "" && document.querySelector('button[aria-label="Open Silver Crown"]')?.getClientRects().length > 0;
+  });
 
   const beforeBackup = await ui.call(async (id) => ({
     detail: await window.coinCatalogApi.getCoin(id),
@@ -239,7 +262,7 @@ async function workflows(win) {
   }), coinId);
   assert.equal(beforeBackup.detail.sessions.length, 1);
   assert.equal(beforeBackup.detail.sessions[0].measurements[0].status, "within");
-  assert.equal(beforeBackup.detail.sessions[0].soundResults.length, 1);
+  assert.equal(beforeBackup.detail.sessions[0].soundResults.length, 2);
   assert.equal(beforeBackup.detail.references[0].label, "Bench sound reference");
   assert.ok(beforeBackup.detail.references[0].peaks.some((peak) => Math.abs(peak.frequencyHz - 400) < 75));
   assert.equal(beforeBackup.references.find((ref) => ref.id === 1).coinId, null);
@@ -268,7 +291,10 @@ setTimeout(() => fail(new Error("Electron workflow check exceeded its time limit
 app.once("browser-window-created", (_event, win) => {
   win.webContents.on("render-process-gone", (_event, details) => fail(new Error(`Renderer exited: ${details.reason}`)));
   win.webContents.once("did-finish-load", () => {
-    workflows(win).then(() => app.quit(), fail);
+    workflows(win).then(() => {
+      fs.writeFileSync(path.join(profile, "workflows-completed"), "", { flag: "wx" });
+      app.quit();
+    }).catch(fail);
   });
 });
 require(path.join(root, "dist-electron/electron/main.js"));

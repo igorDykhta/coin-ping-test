@@ -246,7 +246,9 @@ function SessionEntry({
                 {result.label} <span className="text-xs text-muted-foreground">· {formatCatalogDate(result.createdAt)} · {result.peaks.length} peaks</span>
               </summary>
               <ul className="flex flex-wrap gap-2 font-mono text-xs">
-                {result.peaks.map((peak, index) => <li key={index}>{Math.round(peak.frequencyHz)} Hz</li>)}
+                {result.peaks.map((peak, index) => (
+                  <li key={index}>{Math.round(peak.frequencyHz)} Hz{peak.source === "manual" ? " · Manual entry" : ""}</li>
+                ))}
               </ul>
               {result.matches?.length ? (
                 <ul className="flex flex-wrap gap-2 text-xs">

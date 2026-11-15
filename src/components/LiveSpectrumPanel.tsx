@@ -27,6 +27,7 @@ import {
   AMBIENT_SUBTRACT_MIN_DB,
   ANALYZER_MAX_DB,
   ANALYZER_MIN_DB,
+  clampFrequencyRange,
   detectPeaks,
   FFT_SIZE,
   LIVE_ANALYZER_MAX_DB,
@@ -117,20 +118,23 @@ export function LiveSpectrumPanel({
   onSoundControlsChange,
   selectedReferences = [],
 }: LiveSpectrumPanelProps = {}) {
-  const [desiredFftSize, setDesiredFftSize] = useState<number>(FFT_SIZE);
   const [pingDetectionEnabled, setPingDetectionEnabled] = useState<boolean>(true);
   const [allowLowFreqDetection, setAllowLowFreqDetection] = useState<boolean>(false);
-  const [sampleRate, setSampleRate] = useState<number | null>(null);
+  const [liveSampleRate, setLiveSampleRate] = useState<number | null>(null);
+  const [reviewingRecording, setReviewingRecording] = useState(false);
 
-  const { minHz, maxHz, setRange, resetRange } = useFrequencyRange(sampleRate);
+  const { minHz: preferredMinHz, maxHz: preferredMaxHz, setRange, resetRange } = useFrequencyRange();
+  const liveRate = liveSampleRate ?? 48_000;
+  const liveRange = clampFrequencyRange(preferredMinHz, preferredMaxHz, liveRate);
+  const desiredFftSize = resolveFftSizeForSpan(liveRange.maxHz - liveRange.minHz, liveRate);
 
   // By default, detection ignores everything below ~4 kHz so keyboard/touchpad
   // /mouse mechanical noise (mostly low-frequency) doesn't fire spurious pings.
   // The user can opt in to low-frequency detection via the toggle.
   const detectionMinHz = allowLowFreqDetection
-    ? minHz
-    : Math.max(minHz, PING_DETECTION_MIN_HZ);
-  const detectionMaxHz = maxHz;
+    ? liveRange.minHz
+    : Math.max(liveRange.minHz, PING_DETECTION_MIN_HZ);
+  const detectionMaxHz = liveRange.maxHz;
   const detectionBandValid = detectionMaxHz > detectionMinHz;
 
   const {
@@ -197,9 +201,30 @@ export function LiveSpectrumPanel({
     [addManualPeak],
   );
 
-  const displaySpectrum = recordingSpectrum ?? liveSpectrum;
-  const maxAudibleHz = sampleRate ? Math.floor(sampleRate / 2) : null;
-  const lowSampleRate = sampleRate !== null && sampleRate < 44_100;
+  const reportedLiveRate = liveSpectrum?.sampleRate ?? null;
+  useEffect(() => setLiveSampleRate(reportedLiveRate), [reportedLiveRate]);
+
+  // A newly analyzed take opens its recording view. Starting a new microphone
+  // session returns to live view, while keeping the last take available.
+  useEffect(() => {
+    if (recordingSpectrum) setReviewingRecording(true);
+  }, [recordingSpectrum]);
+  useEffect(() => {
+    if (isListening) setReviewingRecording(false);
+  }, [isListening]);
+
+  const recordingView = Boolean(recordingSpectrum && (!isListening || reviewingRecording));
+  const displaySpectrum = recordingView ? recordingSpectrum : liveSpectrum;
+  const displaySampleRate = displaySpectrum?.sampleRate ?? null;
+  const recordingRate = recordingSpectrum?.sampleRate;
+  const recordingRange = useMemo(
+    () => recordingRate === undefined
+      ? null
+      : clampFrequencyRange(preferredMinHz, preferredMaxHz, recordingRate),
+    [preferredMinHz, preferredMaxHz, recordingRate],
+  );
+  const { minHz, maxHz } = (recordingView && recordingRange) || liveRange;
+  const nyquist = nyquistHz(displaySampleRate ?? liveRate);
 
   // Merge peak frequencies from every selected reference so they are all drawn
   // as blue tolerance bands on the chart simultaneously. Each peak is tagged
@@ -216,19 +241,6 @@ export function LiveSpectrumPanel({
     }
     return lines;
   }, [selectedReferences]);
-
-  useEffect(() => {
-    const next = displaySpectrum?.sampleRate ?? null;
-    setSampleRate((prev) => (prev === next ? prev : next));
-  }, [displaySpectrum]);
-
-  useEffect(() => {
-    if (sampleRate === null) {
-      return;
-    }
-    const next = resolveFftSizeForSpan(maxHz - minHz, sampleRate);
-    setDesiredFftSize((prev) => (prev === next ? prev : next));
-  }, [minHz, maxHz, sampleRate]);
 
   const applyRange = useCallback(
     (nextMinHz: number, nextMaxHz: number) => {
@@ -249,24 +261,18 @@ export function LiveSpectrumPanel({
 
   const recordingPeaks = useMemo(
     () =>
-      recordingSpectrum
+      recordingSpectrum && recordingRange
         ? detectPeaks(recordingSpectrum, {
-            minHz,
-            maxHz,
+            ...recordingRange,
             minDb: recordingSpectrum.ambientSubtracted ? -55 : -70,
           })
         : [],
-    [recordingSpectrum, minHz, maxHz],
+    [recordingSpectrum, recordingRange],
   );
 
-  // Show the latest ping's peaks as vertical lines, regardless of whether
-  // the user is currently viewing the live or the frozen ping spectrum.
-  const latestPingPeaks = useMemo(() => {
-    if (recordingSpectrum) return [];
-    return latestPing?.peaks ?? [];
-  }, [latestPing, recordingSpectrum]);
-
-  const chartPeaks = recordingSpectrum ? recordingPeaks : latestPingPeaks;
+  // Each view shows the peaks measured from its corresponding spectrum.
+  const latestPingPeaks = useMemo(() => latestPing?.peaks ?? [], [latestPing]);
+  const chartPeaks = recordingView ? recordingPeaks : latestPingPeaks;
 
   const manualRecording = useMemo<DetectedPing | undefined>(() => {
     if (!recordingSpectrum || !recordingIdentity || recordingPeaks.length === 0) return undefined;
@@ -276,9 +282,6 @@ export function LiveSpectrumPanel({
       spectrum: recordingSpectrum,
       peaks: recordingPeaks,
       ambientSubtracted: recordingSpectrum.ambientSubtracted ?? false,
-      triggerBandDb: 0,
-      baselineBandDb: 0,
-      topPeakSustainMs: 0,
     };
   }, [recordingSpectrum, recordingIdentity, recordingPeaks]);
 
@@ -314,8 +317,8 @@ export function LiveSpectrumPanel({
     manualRecording,
   ]);
 
-  const chartTitle = recordingSpectrum
-    ? recordingSpectrum.ambientSubtracted
+  const chartTitle = recordingView
+    ? displaySpectrum?.ambientSubtracted
       ? "Recording (ambient subtracted)"
       : "Recording spectrum"
     : isRecording
@@ -328,11 +331,10 @@ export function LiveSpectrumPanel({
             : "Live microphone"
           : undefined;
 
-  const nyquist = sampleRate ? nyquistHz(sampleRate) : 24_000;
   let workspaceStatus = "Capture ambient first, then coin pings spike above the noise floor.";
   if (isFinalizingRecording) {
     workspaceStatus = "Analyzing recording…";
-  } else if (recordingSpectrum) {
+  } else if (recordingView) {
     workspaceStatus = `Showing spectrum for the last recording (${recordingPeaks.length} peaks detected).`;
   } else if (!isListening) {
     workspaceStatus = "Start listening, capture ambient, then record coin pings.";
@@ -405,6 +407,11 @@ export function LiveSpectrumPanel({
               )}
             </>
           )}
+          {isListening && recordingSpectrum ? (
+            <Button type="button" variant="outline" onClick={() => setReviewingRecording(!recordingView)}>
+              {recordingView ? "Show live spectrum" : "Show recording"}
+            </Button>
+          ) : null}
           {recordingSpectrum || recordingBlob ? (
             <Button type="button" variant="outline" onClick={clearRecording}>
               Clear recording
@@ -420,6 +427,7 @@ export function LiveSpectrumPanel({
               minHz={minHz}
               maxHz={maxHz}
               nyquistHz={nyquist}
+              isRecordingView={recordingView}
               onApply={applyRange}
               onReset={resetRangeAndAmbient}
             />
@@ -438,29 +446,29 @@ export function LiveSpectrumPanel({
           </div>
         </details>
 
-        {sampleRate !== null ? (
+        {displaySampleRate !== null ? (
           <p
             className={cn(
               "text-xs",
-              lowSampleRate ? "text-amber-400" : "text-muted-foreground",
+              !recordingView && displaySampleRate < 44_100 ? "text-amber-400" : "text-muted-foreground",
             )}
           >
-            Audio sample rate: {Math.round(sampleRate / 1000)} kHz (max frequency ~
-            {Math.round((maxAudibleHz ?? 0) / 1000)} kHz).
-            {lowSampleRate
+            {recordingView ? "Recording sample rate" : "Audio sample rate"}: {Math.round(displaySampleRate / 1000)} kHz (max frequency ~
+            {Math.round(nyquist / 1000)} kHz).
+            {!recordingView && displaySampleRate < 44_100
               ? " Switch input device or disable Bluetooth headset to get full bandwidth."
               : null}
           </p>
         ) : null}
 
-        {isListening && desiredFftSize > FFT_SIZE && sampleRate !== null ? (
+        {isListening && !recordingView && desiredFftSize > FFT_SIZE && liveSampleRate !== null ? (
           <p className="text-xs text-muted-foreground">
-            Zoom uses FFT {desiredFftSize} (~{(sampleRate / desiredFftSize).toFixed(1)} Hz/bin) for
+            Zoom uses FFT {desiredFftSize} (~{(liveSampleRate / desiredFftSize).toFixed(1)} Hz/bin) for
             finer resolution; response is slightly slower than the default FFT {FFT_SIZE}.
           </p>
         ) : null}
 
-        {pingCaptureProgress ? null : (
+        {!recordingView && pingCaptureProgress ? null : (
           <p
             className={cn(
               "text-sm",
@@ -471,7 +479,8 @@ export function LiveSpectrumPanel({
           </p>
         )}
 
-        <div className="relative min-h-[320px] flex-1 rounded-md border border-border bg-card">
+        <div role="region" aria-label={recordingView ? "Recording spectrum" : "Live spectrum"}
+          className="relative min-h-[320px] flex-1 rounded-md border border-border bg-card">
           <ContextMenu
             onOpenChange={(open) => {
               if (!open) setContextMenuFrequency(null);
@@ -480,53 +489,53 @@ export function LiveSpectrumPanel({
             <ContextMenuTrigger asChild>
               <div className="h-full w-full">
                 <SpectrumChart
-                  key={recordingSpectrum ? "recording" : "live"}
+                  key={recordingView ? "recording" : "live"}
                   spectrum={displaySpectrum}
                   peaks={chartPeaks}
-                  onRangeChange={recordingSpectrum ? undefined : setRange}
+                  onRangeChange={recordingView ? undefined : setRange}
                   onContextMenuFrequency={
-                    recordingSpectrum ? undefined : handleChartContextMenu
+                    recordingView ? undefined : handleChartContextMenu
                   }
                   title={chartTitle}
                   minDb={
                     usesAmbientScale
                       ? AMBIENT_SUBTRACT_MIN_DB
-                      : recordingSpectrum
+                      : recordingView
                         ? ANALYZER_MIN_DB
                         : LIVE_ANALYZER_MIN_DB
                   }
                   maxDb={
                     usesAmbientScale
                       ? AMBIENT_SUBTRACT_MAX_DB
-                      : recordingSpectrum
+                      : recordingView
                         ? ANALYZER_MAX_DB
                         : LIVE_ANALYZER_MAX_DB
                   }
                   displayBoostDb={
-                    usesAmbientScale || recordingSpectrum
+                    usesAmbientScale || recordingView
                       ? 0
                       : LIVE_DISPLAY_BOOST_DB
                   }
                   minHz={minHz}
                   maxHz={maxHz}
                   logFrequency
-                  peakHold={!recordingSpectrum}
+                  peakHold={!recordingView}
                   overlaySpectrum={
-                    recordingSpectrum ? null : chartOverlaySpectrum
+                    recordingView ? null : chartOverlaySpectrum
                   }
                   accumulatedOverlaySpectrum={
-                    recordingSpectrum ? null : chartAccumulatedOverlay
+                    recordingView ? null : chartAccumulatedOverlay
                   }
                   referenceLines={referenceLines}
                   captureWindow={
-                    pingCaptureProgress
+                    !recordingView && pingCaptureProgress
                       ? {
                           startedAtMs: pingCaptureProgress.startedAtMs,
                           totalMs: pingCaptureProgress.totalMs,
                         }
                       : null
                   }
-                  isRecordingActive={isRecording && !recordingSpectrum}
+                  isRecordingActive={isRecording && !recordingView}
                 />
               </div>
             </ContextMenuTrigger>
@@ -553,7 +562,7 @@ export function LiveSpectrumPanel({
           </ContextMenu>
         </div>
 
-        {recordingPeaks.length > 0 ? (
+        {recordingView && recordingPeaks.length > 0 ? (
           <div className="text-xs text-muted-foreground">
             <span className="font-medium text-foreground">Resonances: </span>
             {recordingPeaks
@@ -562,7 +571,7 @@ export function LiveSpectrumPanel({
           </div>
         ) : null}
 
-        {!recordingSpectrum ? <ManualPeakEntry maxHz={Math.min(ABSOLUTE_MAX_DISPLAY_HZ, Math.floor(nyquist))} onAdd={addManualPeak} /> : null}
+        {!recordingView ? <ManualPeakEntry maxHz={Math.min(ABSOLUTE_MAX_DISPLAY_HZ, Math.floor(nyquist))} onAdd={addManualPeak} /> : null}
 
         {captureError ? <p role="alert" className="text-sm text-red-400">{captureError}</p> : null}
       </CardContent>

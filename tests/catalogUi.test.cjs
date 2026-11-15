@@ -125,6 +125,28 @@ test("a catalog card falls back to the remaining photo when the visible face is 
   assert.deepEqual(card.all("Button"), []);
 });
 
+test("catalog clears unavailable filter options after an edit and retains valid filters", () => {
+  const h = catalogHarness();
+  const { CoinCatalog } = h.load("src/components/CoinCatalog.tsx");
+  const original = coin(1, { name: "Crown", country: "UK", composition: "Silver" });
+  const catalog = h.mount(CoinCatalog, { coins: [original] });
+  catalog.select("Country", "UK");
+  catalog.select("Composition", "Silver");
+  catalog.fill("Search coins", "Crown");
+  const value = (label) => catalog.find("CatalogSelect", (node) => node.props.label === label).props.value;
+  const edited = { ...original, country: "Canada" };
+  catalog.render({ coins: [edited] });
+  assert.equal(value("Country"), "");
+  assert.equal(value("Composition"), "Silver");
+  assert.equal(catalog.find("CoinCard").props.coin.country, "Canada");
+
+  catalog.render({ coins: [{ ...edited, composition: "Gold" }, coin(2, { country: "UK" })] });
+  assert.equal(value("Composition"), "");
+  assert.equal(value("Country"), "", "Adding a new UK coin does not reactivate the old filter");
+  assert.equal(catalog.field("Search coins").value, "Crown");
+  assert.deepEqual(catalog.all("CoinCard").map(({ props }) => props.coin.id), [1]);
+});
+
 test("coin creation keeps invalid year ranges in the form and submits corrected values", async () => {
   const submitted = [];
   const h = catalogHarness();

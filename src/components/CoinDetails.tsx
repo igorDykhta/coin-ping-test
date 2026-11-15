@@ -54,7 +54,7 @@ function CoinSoundReferences({
                   <p className="text-xs text-muted-foreground">{formatCatalogDate(reference.createdAt)} · {reference.peaks.length} peaks</p>
                   <ul className="flex flex-wrap gap-2 font-mono text-xs">
                     {reference.peaks.map((peak, index) => (
-                      <li key={index}>{Math.round(peak.frequencyHz)} Hz{peak.kind ? ` (${peak.kind})` : ""}</li>
+                      <li key={index}>{Math.round(peak.frequencyHz)} Hz{peak.kind ? ` (${peak.kind})` : ""}{peak.source === "manual" ? " · Manual entry" : ""}</li>
                     ))}
                   </ul>
                 </div>

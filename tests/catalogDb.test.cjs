@@ -38,6 +38,27 @@ function open(t, filename = ":memory:") {
   return db;
 }
 
+run("manual peaks round-trip in references and test results without fake measurements", (t) => {
+  const { dir, open } = fileFixture(t);
+  const filename = path.join(dir, "catalog.sqlite");
+  const db = open(filename);
+  const coin = db.createCoin({ name: "Crown" });
+  const session = db.createSession(coin.id, { label: "Frequency notes" });
+  const manual = { source: "manual", frequencyHz: 5500, kind: "long" };
+  const mixed = [manual, ...peaks];
+  db.createReference({ coinId: coin.id, label: "Reference", peaks: mixed });
+  db.saveSoundResult(session.id, { label: "Result", peaks: mixed });
+  assert.throws(() => db.createReference({ label: "No provenance", peaks: [{ frequencyHz: 5500 }] }), /Peak magnitude/);
+  assert.throws(() => db.saveSoundResult(session.id, {
+    label: "Fake duration", peaks: [{ ...manual, sustainMs: 300 }],
+  }), /Manual peaks cannot include measured values/);
+  db.checkpointAndClose();
+
+  const reopened = open(filename).getCoin(coin.id);
+  assert.deepEqual(reopened.references[0].peaks, mixed);
+  assert.deepEqual(reopened.sessions[0].soundResults[0].peaks, mixed);
+});
+
 run("migrates the original reference library without changing record IDs or peak data", async (t) => {
   const { dir, open } = fileFixture(t);
   const filename = path.join(dir, "legacy.sqlite");

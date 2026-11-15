@@ -1,4 +1,4 @@
-import { useMemo, useState, type ReactNode } from "react";
+import { useEffect, useMemo, useState, type ReactNode } from "react";
 import { Badge, Button, Card, CardContent, CardHeader } from "@sqlrooms/ui";
 
 import type { CoinFace, CoinInput, CoinSummary } from "../types/catalog";
@@ -95,14 +95,22 @@ export function CoinCatalog({
   );
   const countries = distinct(visible.map((coin) => coin.country));
   const compositions = distinct(visible.map((coin) => coin.composition));
+  const activeCountry = countries.includes(country) ? country : "";
+  const activeComposition = compositions.includes(composition) ? composition : "";
+
+  useEffect(() => {
+    if (country !== activeCountry) setCountry(activeCountry);
+    if (composition !== activeComposition) setComposition(activeComposition);
+  }, [activeCountry, activeComposition, country, composition]);
+
   const search = query.trim().toLocaleLowerCase();
   const filtered = visible.filter((coin) => {
     const searchable = [
       coin.name, coin.country, coin.denomination, coin.variant, coin.mint, coin.composition, coinYear(coin),
     ].join(" ").toLocaleLowerCase();
     if (!searchable.includes(search)) return false;
-    if (country && coin.country !== country) return false;
-    if (composition && coin.composition !== composition) return false;
+    if (activeCountry && coin.country !== activeCountry) return false;
+    if (activeComposition && coin.composition !== activeComposition) return false;
     if (year && (coin.yearFrom === undefined || Number(year) < coin.yearFrom || Number(year) > (coin.yearTo ?? coin.yearFrom))) return false;
     if (availability === "faces" && (coin.primaryObverseId === null || coin.primaryReverseId === null)) return false;
     if (availability === "sound" && coin.referenceCount === 0) return false;
@@ -154,11 +162,11 @@ export function CoinCatalog({
             onChange={(event) => changeFilter(setQuery, event.target.value)}
           />
         </div>
-        <CatalogSelect label="Country" value={country} onChange={(value) => changeFilter(setCountry, value)}>
+        <CatalogSelect label="Country" value={activeCountry} onChange={(value) => changeFilter(setCountry, value)}>
           <option value="">All countries</option>
           {countries.map((value) => <option key={value}>{value}</option>)}
         </CatalogSelect>
-        <CatalogSelect label="Composition" value={composition} onChange={(value) => changeFilter(setComposition, value)}>
+        <CatalogSelect label="Composition" value={activeComposition} onChange={(value) => changeFilter(setComposition, value)}>
           <option value="">All compositions</option>
           {compositions.map((value) => <option key={value}>{value}</option>)}
         </CatalogSelect>
@@ -175,7 +183,7 @@ export function CoinCatalog({
           {filtered.length} {filtered.length === 1 ? "coin" : "coins"}
         </p>
         <div className="flex gap-2">
-          {(query || country || composition || year || availability) && (
+          {(query || activeCountry || activeComposition || year || availability) && (
             <Button type="button" variant="ghost" size="sm" onClick={clearFilters}>Clear filters</Button>
           )}
           <label className="flex items-center gap-2 text-sm">

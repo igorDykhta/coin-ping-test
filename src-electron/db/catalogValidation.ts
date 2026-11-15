@@ -159,11 +159,21 @@ export function validPeaks(input: unknown): ResonancePeak[] {
     if (!Number.isFinite(peak.frequencyHz) || peak.frequencyHz <= 0) {
       throw new ValidationError("Peak frequency must be a positive number.");
     }
-    if (!Number.isFinite(peak.magnitude)) {
-      throw new ValidationError("Peak magnitude must be a finite number.");
-    }
     if (peak.kind !== undefined && peak.kind !== "long" && peak.kind !== "short") {
       throw new ValidationError("Invalid peak classification.");
+    }
+    if (peak.source === "manual") {
+      if (peak.kind === undefined) throw new ValidationError("Choose a classification for the manual peak.");
+      if (peak.magnitude !== undefined || peak.sustainMs !== undefined || peak.accumulatedPowerDb !== undefined) {
+        throw new ValidationError("Manual peaks cannot include measured values.");
+      }
+      return { source: "manual", frequencyHz: peak.frequencyHz, kind: peak.kind };
+    }
+    if (peak.source !== undefined && peak.source !== "measured") {
+      throw new ValidationError("Invalid peak source.");
+    }
+    if (!Number.isFinite(peak.magnitude)) {
+      throw new ValidationError("Peak magnitude must be a finite number.");
     }
     if (peak.sustainMs !== undefined && (!Number.isFinite(peak.sustainMs) || peak.sustainMs < 0)) {
       throw new ValidationError("Peak sustain duration must be a nonnegative number.");
@@ -172,6 +182,7 @@ export function validPeaks(input: unknown): ResonancePeak[] {
       throw new ValidationError("Accumulated peak power must be a finite number.");
     }
     return {
+      source: peak.source,
       frequencyHz: peak.frequencyHz,
       magnitude: peak.magnitude,
       kind: peak.kind,

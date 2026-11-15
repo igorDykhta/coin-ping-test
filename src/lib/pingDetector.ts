@@ -53,10 +53,10 @@ export type DetectedPing = {
   accumulatedSpectrum?: SpectrumData | null;
   peaks: ResonancePeak[];
   ambientSubtracted: boolean;
-  triggerBandDb: number;
-  baselineBandDb: number;
+  triggerBandDb?: number;
+  baselineBandDb?: number;
   /** Max consecutive sustained-near-peak duration (ms) of the top peak's bin. */
-  topPeakSustainMs: number;
+  topPeakSustainMs?: number;
 };
 
 const DEFAULT_THRESHOLD_DB = 12;

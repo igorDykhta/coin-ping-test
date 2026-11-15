@@ -16,6 +16,9 @@ try {
     windowsHide: true,
   });
   if (result.error) throw result.error;
+  if (result.status === 0 && !fs.existsSync(path.join(profile, "workflows-completed"))) {
+    throw new Error("Electron exited before completing the workflow checks.");
+  }
   process.exitCode = result.status ?? 1;
 } finally {
   fs.rmSync(profile, { recursive: true, force: true });

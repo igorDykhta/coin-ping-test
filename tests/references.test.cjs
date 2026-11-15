@@ -130,36 +130,59 @@ test("retrying a reference save keeps the just-created coin before the catalog r
   assert.deepEqual(saved.map(({ coinId }) => coinId), [42, 42]);
 });
 
-test("saving a sound result does not mark it saved in a different session", async () => {
+test("the reference dialog identifies manually entered peaks and preserves their provenance", async () => {
+  let saved;
+  const peak = { source: "manual", frequencyHz: 5500, kind: "long" };
+  const dialog = createSaveDialog({ createReference(input) { saved = input; } });
+  const tree = dialog.render({ ping: { id: "manual-peak", detectedAt: "2026-01-01", peaks: [peak] } });
+  const details = findElement(tree, (el) => el.type === "li");
+  assert.equal(details.props.children[0], "5500 Hz · Manual entry");
+  const serialized = JSON.stringify(tree);
+  assert.doesNotMatch(serialized, /sustained|NaN|dB/);
+  await dialog.save(tree);
+  assert.deepEqual(saved.peaks, [peak]);
+});
+
+test("sound result save status tracks both the session and the peak set", async () => {
   const listRunner = createHookRunner();
   const { DetectedPingsList } = createLoader({
     react: listRunner.react, "@sqlrooms/ui": { Button: "Button" },
   })("src/components/DetectedPingsList.tsx");
   const ping = {
-    id: "one-take", detectedAt: "2026-01-01", peaks: [{ frequencyHz: 5000, magnitude: -20 }],
+    id: "one-take", detectedAt: "2026-01-01", peaks: [
+      { frequencyHz: 6000, magnitude: -20 }, { frequencyHz: 9000, magnitude: -22 },
+    ],
     triggerBandDb: -25, baselineBandDb: -70, topPeakSustainMs: 300,
   };
   const savedTo = [];
   const first = "1:21", second = "1:22";
   const tree = listRunner.render(() => DetectedPingsList({
     pings: [ping], enabled: true,
-    resultDestination: first, onSaveResult: async () => { savedTo.push(first); },
+    resultDestination: first,
   }));
   const item = findElement(tree, (el) => el.type?.name === "DetectedPingItem");
   const runner = createHookRunner();
   Object.assign(listRunner.react, runner.react);
-  function resultButton(destination) {
+  function resultButton(destination, peaks = ping.peaks) {
     const rendered = runner.render(() => item.type({
       ...item.props,
+      ping: { ...ping, peaks },
       resultDestination: destination,
-      onSaveResult: async () => { savedTo.push(destination); },
+      onSaveResult: async (result) => { savedTo.push([destination, result.peaks.map((peak) => peak.frequencyHz)]); },
     }));
     return findElement(rendered, (el) => el.type === "Button" && /test result/i.test(el.props.children)).props;
   }
   resultButton(first).onClick();
   await new Promise(setImmediate);
-  assert.deepEqual(savedTo, [first]);
+  assert.deepEqual(savedTo, [[first, [6000, 9000]]]);
   assert.equal(resultButton(first).disabled, true);
   assert.equal(resultButton(second).disabled, false);
   assert.equal(resultButton(first).disabled, true);
+  const narrowed = ping.peaks.slice(0, 1);
+  assert.equal(resultButton(first, narrowed).disabled, false);
+  resultButton(first, narrowed).onClick();
+  await new Promise(setImmediate);
+  assert.deepEqual(savedTo, [[first, [6000, 9000]], [first, [6000]]]);
+  assert.equal(resultButton(first, narrowed).disabled, true);
+  assert.equal(resultButton(first, [...ping.peaks].reverse()).disabled, true);
 });

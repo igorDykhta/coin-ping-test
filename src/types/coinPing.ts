@@ -1,4 +1,6 @@
-export type ResonancePeak = {
+export type MeasuredResonancePeak = {
+  /** Absent in existing measured references. */
+  source?: "measured";
   frequencyHz: number;
   magnitude: number;
   /**
@@ -18,6 +20,18 @@ export type ResonancePeak = {
    */
   accumulatedPowerDb?: number;
 };
+
+export type ManualResonancePeak = {
+  source: "manual";
+  frequencyHz: number;
+  /** User-selected classification. */
+  kind: "long" | "short";
+  magnitude?: never;
+  sustainMs?: never;
+  accumulatedPowerDb?: never;
+};
+
+export type ResonancePeak = MeasuredResonancePeak | ManualResonancePeak;
 
 export type ReferenceInput = {
   label: string;

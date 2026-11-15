@@ -13,7 +13,7 @@ import {
 import { findMatchingReferences, type ReferenceMatch } from "../lib/coinMatcher";
 import type { DetectedPing } from "../lib/pingDetector";
 import type { CoinSummary } from "../types/catalog";
-import type { ReferenceRecord } from "../types/coinPing";
+import type { ReferenceRecord, ResonancePeak } from "../types/coinPing";
 
 type Props = {
   pings: DetectedPing[];
@@ -37,6 +37,11 @@ function formatTime(iso: string): string {
   } catch {
     return iso;
   }
+}
+
+function formatPeak(peak: ResonancePeak): string {
+  const frequency = `${Math.round(peak.frequencyHz)} Hz`;
+  return peak.source === "manual" ? `${frequency} · Manual entry` : `${frequency} · ${peak.magnitude.toFixed(1)} dB`;
 }
 
 function defaultLabelFor(ping: DetectedPing): string {
@@ -176,6 +181,10 @@ function DetectedPingItem({
     typeof window !== "undefined" && typeof window.coinPingApi !== "undefined";
 
   const peaksToShow = ping.peaks.slice(0, 4);
+  const manualPeaksOnly = ping.peaks.every((peak) => peak.source === "manual");
+  const levelAboveFloor = ping.triggerBandDb !== undefined && ping.baselineBandDb !== undefined
+    ? ping.triggerBandDb - ping.baselineBandDb
+    : null;
 
   const matches = useMemo(
     () => findMatchingReferences(ping.peaks, references),
@@ -184,13 +193,17 @@ function DetectedPingItem({
   const bestMatch = matches[0];
   const hasMatch = bestMatch !== undefined;
   const [resultStates, setResultStates] = useState(() => new Map<string, ResultSaveState>());
-  const resultState = resultStates.get(resultDestination);
+  const peakSet = useMemo(() => ping.peaks.map((peak) => JSON.stringify([
+    peak.frequencyHz, peak.kind, peak.magnitude, peak.sustainMs, peak.accumulatedPowerDb, peak.source,
+  ])).sort(), [ping.peaks]);
+  const resultKey = JSON.stringify([resultDestination, peakSet]);
+  const resultState = resultStates.get(resultKey);
   const resultError = typeof resultState === "object" ? resultState.error : null;
 
   async function saveResult() {
     if (!onSaveResult || resultState === "saving" || resultState === "saved") return;
     const setResult = (nextState: ResultSaveState) => {
-      setResultStates((previous) => new Map(previous).set(resultDestination, nextState));
+      setResultStates((previous) => new Map(previous).set(resultKey, nextState));
     };
     setResult("saving");
     try {
@@ -212,17 +225,17 @@ function DetectedPingItem({
       <div className="flex items-start justify-between gap-2">
         <div className="min-w-0 flex-1">
           <div className="font-medium text-foreground">
-            {manual ? "Manual recording" : formatTime(ping.detectedAt)}{" "}
-            {!manual ? <span className="font-normal text-muted-foreground">
-              · +{(ping.triggerBandDb - ping.baselineBandDb).toFixed(1)} dB above floor
-              · sustained {Math.round(ping.topPeakSustainMs)} ms
+            {manual ? "Manual recording" : manualPeaksOnly ? "Manual peaks" : formatTime(ping.detectedAt)}{" "}
+            {!manual && !manualPeaksOnly ? <span className="font-normal text-muted-foreground">
+              {levelAboveFloor !== null ? ` · +${levelAboveFloor.toFixed(1)} dB above floor` : ""}
+              {ping.topPeakSustainMs !== undefined ? ` · sustained ${Math.round(ping.topPeakSustainMs)} ms` : ""}
               {ping.ambientSubtracted ? " · ambient-subtracted" : ""}
             </span> : null}
           </div>
           <div className="mt-1 flex flex-wrap items-center gap-x-2 gap-y-0.5 text-muted-foreground">
             {peaksToShow.map((p, idx) => (
               <span key={idx} className="font-mono">
-                {Math.round(p.frequencyHz)} Hz · {p.magnitude.toFixed(1)} dB
+                {formatPeak(p)}
                 {p.kind === "short" ? (
                   <span className="ml-1 rounded-sm bg-amber-500/20 px-1 text-[10px] text-amber-300">
                     short
@@ -374,13 +387,7 @@ function SavePingDialog({ ping, onClose, onSaved, coins, selectedCoinId, onCreat
       await window.coinPingApi.createReference({
         label: trimmed,
         ...(coins ? { coinId } : {}),
-        peaks: ping.peaks.map((p) => ({
-          frequencyHz: p.frequencyHz,
-          magnitude: p.magnitude,
-          kind: p.kind,
-          sustainMs: p.sustainMs,
-          accumulatedPowerDb: p.accumulatedPowerDb,
-        })),
+        peaks: ping.peaks,
       });
       onSaved(ping.id);
       onClose();
@@ -405,10 +412,12 @@ function SavePingDialog({ ping, onClose, onSaved, coins, selectedCoinId, onCreat
         <DialogHeader>
           <DialogTitle>Save coin ping as reference</DialogTitle>
           <DialogDescription>
-            {ping ? (
+            {ping?.peaks.every((peak) => peak.source === "manual") ? (
+              <>Manual peaks entered at {formatTime(ping.detectedAt)}</>
+            ) : ping ? (
               <>
-                Detected at {formatTime(ping.detectedAt)} · sustained{" "}
-                {Math.round(ping.topPeakSustainMs)} ms ·{" "}
+                Detected at {formatTime(ping.detectedAt)}
+                {ping.topPeakSustainMs !== undefined ? ` · sustained ${Math.round(ping.topPeakSustainMs)} ms` : ""} ·{" "}
                 {ping.ambientSubtracted ? "ambient-subtracted" : "raw"}
               </>
             ) : null}
@@ -466,7 +475,7 @@ function SavePingDialog({ ping, onClose, onSaved, coins, selectedCoinId, onCreat
               <ul className="space-y-0.5 rounded-md border border-border bg-background/60 p-2 text-xs text-muted-foreground">
                 {ping.peaks.map((p, idx) => (
                   <li key={idx} className="font-mono">
-                    {Math.round(p.frequencyHz)} Hz ({p.magnitude.toFixed(1)} dB)
+                    {formatPeak(p)}
                     {p.kind === "short" ? (
                       <span className="ml-2 rounded-sm bg-amber-500/20 px-1 text-[10px] text-amber-300">
                         short

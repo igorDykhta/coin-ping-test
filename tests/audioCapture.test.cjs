@@ -8,6 +8,26 @@ function assertReleased(h) {
   assert.equal(h.frames.size, 0);
 }
 
+test("manual peaks carry no measured level or sustain even with live spectrum data", async () => {
+  const h = createAudioHarness();
+  h.api.addManualPeak(5500, "long");
+  let [ping] = h.render().detectedPings;
+  assert.deepEqual(ping.peaks, [{ source: "manual", frequencyHz: 5500, kind: "long" }]);
+  assert.equal(ping.topPeakSustainMs, undefined);
+  assert.equal(ping.triggerBandDb, undefined);
+  assert.equal(ping.baselineBandDb, undefined);
+
+  h.api.clearDetectedPings();
+  await h.api.startListening();
+  h.frame(80).addManualPeak(6200, "short");
+  [ping] = h.render().detectedPings;
+  assert.ok(ping.spectrum.values.length > 0);
+  assert.deepEqual(ping.peaks, [{ source: "manual", frequencyHz: 6200, kind: "short" }]);
+  assert.equal(ping.topPeakSustainMs, undefined);
+  await h.api.stopListening();
+  assertReleased(h);
+});
+
 test("overlapping starts create one session and Stop releases it", async () => {
   const h = createAudioHarness();
   await Promise.all([h.api.startListening(), h.api.startListening()]);

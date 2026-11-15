@@ -1,7 +1,8 @@
-import { useCallback, useEffect, useMemo, useState } from "react";
+import { useCallback, useState } from "react";
 
 import {
   clampFrequencyRange,
+  ABSOLUTE_MAX_DISPLAY_HZ,
   DEFAULT_MAX_DISPLAY_HZ,
   DEFAULT_MIN_DISPLAY_HZ,
   type FrequencyRange,
@@ -29,46 +30,23 @@ function loadStoredRange(): FrequencyRange {
   return { minHz: DEFAULT_MIN_DISPLAY_HZ, maxHz: DEFAULT_MAX_DISPLAY_HZ };
 }
 
-export function useFrequencyRange(sampleRate: number | null) {
+export function useFrequencyRange() {
   const [range, setRangeState] = useState<FrequencyRange>(loadStoredRange);
 
-  const resolved = useMemo(() => {
-    const rate = sampleRate ?? 48_000;
-    return clampFrequencyRange(range.minHz, range.maxHz, rate);
-  }, [range.minHz, range.maxHz, sampleRate]);
-
-  useEffect(() => {
-    if (sampleRate === null) {
-      return;
-    }
-    const reclamped = clampFrequencyRange(range.minHz, range.maxHz, sampleRate);
-    if (reclamped.minHz !== range.minHz || reclamped.maxHz !== range.maxHz) {
-      setRangeState(reclamped);
-      localStorage.setItem(STORAGE_KEY, JSON.stringify(reclamped));
-    }
-  }, [sampleRate, range.minHz, range.maxHz]);
-
   const setRange = useCallback((minHz: number, maxHz: number) => {
-    const rate = sampleRate ?? 48_000;
-    const next = clampFrequencyRange(minHz, maxHz, rate);
+    // Keep the preferred bounds when the microphone and a retained recording
+    // have different frequency limits. Each spectrum clamps its own view.
+    const next = clampFrequencyRange(minHz, maxHz, 2 * ABSOLUTE_MAX_DISPLAY_HZ);
     setRangeState(next);
     localStorage.setItem(STORAGE_KEY, JSON.stringify(next));
-  }, [sampleRate]);
+  }, []);
 
   const resetRange = useCallback(() => {
-    const rate = sampleRate ?? 48_000;
-    const next = clampFrequencyRange(
-      DEFAULT_MIN_DISPLAY_HZ,
-      DEFAULT_MAX_DISPLAY_HZ,
-      rate,
-    );
-    setRangeState(next);
-    localStorage.setItem(STORAGE_KEY, JSON.stringify(next));
-  }, [sampleRate]);
+    setRange(DEFAULT_MIN_DISPLAY_HZ, DEFAULT_MAX_DISPLAY_HZ);
+  }, [setRange]);
 
   return {
-    minHz: resolved.minHz,
-    maxHz: resolved.maxHz,
+    ...range,
     setRange,
     resetRange,
   };
