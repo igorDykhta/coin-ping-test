@@ -35,16 +35,25 @@ import {
   PING_DETECTION_MIN_HZ,
   resolveFftSizeForSpan,
 } from "../lib/spectrum";
+import { AMBIENT_CAPTURE_MS } from "../lib/ambient";
 
 export type DetectedPingsExternalState = {
   pings: DetectedPing[];
   enabled: boolean;
   clearAll: () => void;
   dismiss: (id: string) => void;
+  manualRecording?: DetectedPing;
+};
+
+export type SoundControls = {
+  isRecording: boolean;
+  finishRecording: () => Promise<void>;
+  stopListening: () => Promise<void>;
 };
 
 type LiveSpectrumPanelProps = {
   onDetectedPingsChange?: (state: DetectedPingsExternalState) => void;
+  onSoundControlsChange?: (controls: SoundControls) => void;
   /**
    * Saved reference recordings whose peak frequencies should be highlighted on
    * the chart. All peaks from all selected references are overlaid together so
@@ -55,6 +64,7 @@ type LiveSpectrumPanelProps = {
 
 export function LiveSpectrumPanel({
   onDetectedPingsChange,
+  onSoundControlsChange,
   selectedReferences = [],
 }: LiveSpectrumPanelProps = {}) {
   const [desiredFftSize, setDesiredFftSize] = useState<number>(FFT_SIZE);
@@ -207,6 +217,24 @@ export function LiveSpectrumPanel({
 
   const chartPeaks = recordingSpectrum ? recordingPeaks : latestPingPeaks;
 
+  const manualRecording = useMemo<DetectedPing | undefined>(() => {
+    if (!recordingSpectrum || recordingPeaks.length === 0) return undefined;
+    return {
+      id: `recording-${Date.now()}`,
+      detectedAt: new Date().toISOString(),
+      spectrum: recordingSpectrum,
+      peaks: recordingPeaks,
+      ambientSubtracted: recordingSpectrum.ambientSubtracted ?? false,
+      triggerBandDb: 0,
+      baselineBandDb: 0,
+      topPeakSustainMs: 0,
+    };
+  }, [recordingSpectrum, recordingPeaks]);
+
+  useEffect(() => {
+    onSoundControlsChange?.({ isRecording, finishRecording: stopRecording, stopListening });
+  }, [isRecording, onSoundControlsChange, stopListening, stopRecording]);
+
   // Stream the current detection state out to the parent so the pings list
   // can live elsewhere in the layout (left column under references).
   const detectionEnabledForList = pingDetectionEnabled && isListening;
@@ -216,6 +244,7 @@ export function LiveSpectrumPanel({
       enabled: detectionEnabledForList,
       clearAll: clearDetectedPings,
       dismiss: dismissDetectedPing,
+      manualRecording,
     });
   }, [
     detectedPings,
@@ -223,6 +252,7 @@ export function LiveSpectrumPanel({
     clearDetectedPings,
     dismissDetectedPing,
     onDetectedPingsChange,
+    manualRecording,
   ]);
 
   const chartTitle = recordingSpectrum
@@ -359,7 +389,7 @@ export function LiveSpectrumPanel({
             {!isListening
               ? "Start listening, capture ambient, then record coin pings."
               : isCapturingAmbient
-                ? "Keep the room quiet for 10 seconds while we measure the noise floor per frequency."
+                ? `Keep the room quiet for ${AMBIENT_CAPTURE_MS / 1000} seconds while we measure background noise.`
                 : isRecording
                   ? "Recording… strike the coin, then stop to analyze the ping."
                   : recordingSpectrum

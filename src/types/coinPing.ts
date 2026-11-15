@@ -22,6 +22,7 @@ export type ResonancePeak = {
 export type ReferenceInput = {
   label: string;
   peaks: ResonancePeak[];
+  coinId?: number | null;
 };
 
 export type ReferenceRecord = ReferenceInput & {
@@ -30,6 +31,7 @@ export type ReferenceRecord = ReferenceInput & {
 };
 
 export type CoinPingApi = {
+  requestMicrophoneAccess: () => Promise<boolean>;
   listReferences: () => Promise<ReferenceRecord[]>;
   createReference: (input: ReferenceInput) => Promise<ReferenceRecord>;
   deleteReference: (id: number) => Promise<void>;

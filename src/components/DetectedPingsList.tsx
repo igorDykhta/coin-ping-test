@@ -12,6 +12,7 @@ import {
 
 import { findMatchingReferences, type ReferenceMatch } from "../lib/coinMatcher";
 import type { DetectedPing } from "../lib/pingDetector";
+import type { CoinSummary } from "../types/catalog";
 import type { ReferenceRecord } from "../types/coinPing";
 
 type Props = {
@@ -21,6 +22,11 @@ type Props = {
   onClearAll: () => void;
   onDismiss: (id: string) => void;
   onReferenceSaved?: () => void;
+  manualRecording?: DetectedPing;
+  coins?: readonly CoinSummary[];
+  selectedCoinId?: number | null;
+  onCreateCoin?: (name: string) => Promise<number>;
+  onSaveResult?: (ping: DetectedPing, matches: ReferenceMatch[]) => Promise<void>;
 };
 
 function formatTime(iso: string): string {
@@ -47,6 +53,11 @@ export function DetectedPingsList({
   onClearAll,
   onDismiss,
   onReferenceSaved,
+  manualRecording,
+  coins,
+  selectedCoinId,
+  onCreateCoin,
+  onSaveResult,
 }: Props) {
   const ordered = useMemo(() => [...pings].reverse(), [pings]);
   const [pingToSave, setPingToSave] = useState<DetectedPing | null>(null);
@@ -84,13 +95,25 @@ export function DetectedPingsList({
         ) : null}
       </div>
 
-      {ordered.length === 0 ? (
+      {ordered.length === 0 && !manualRecording ? (
         <p className="text-xs text-muted-foreground">
           Strike a coin. Sustained, tonal spikes above the running noise floor
           will be recorded here.
         </p>
       ) : (
         <ul className="flex min-h-0 flex-1 flex-col gap-2 overflow-y-auto pr-1">
+          {manualRecording ? (
+            <DetectedPingItem
+              key={manualRecording.id}
+              ping={manualRecording}
+              manual
+              references={references}
+              saved={savedIds.has(manualRecording.id)}
+              onRequestSave={setPingToSave}
+              coins={coins}
+              onSaveResult={onSaveResult}
+            />
+          ) : null}
           {ordered.map((ping) => (
             <DetectedPingItem
               key={ping.id}
@@ -99,6 +122,8 @@ export function DetectedPingsList({
               saved={savedIds.has(ping.id)}
               onDismiss={onDismiss}
               onRequestSave={setPingToSave}
+              coins={coins}
+              onSaveResult={onSaveResult}
             />
           ))}
         </ul>
@@ -108,6 +133,9 @@ export function DetectedPingsList({
         ping={pingToSave}
         onClose={() => setPingToSave(null)}
         onSaved={handleSaved}
+        coins={coins}
+        selectedCoinId={selectedCoinId}
+        onCreateCoin={onCreateCoin}
       />
     </div>
   );
@@ -117,8 +145,11 @@ type ItemProps = {
   ping: DetectedPing;
   references: readonly ReferenceRecord[];
   saved: boolean;
-  onDismiss: (id: string) => void;
+  onDismiss?: (id: string) => void;
   onRequestSave: (ping: DetectedPing) => void;
+  coins?: readonly CoinSummary[];
+  manual?: boolean;
+  onSaveResult?: Props["onSaveResult"];
 };
 
 function DetectedPingItem({
@@ -127,6 +158,9 @@ function DetectedPingItem({
   saved,
   onDismiss,
   onRequestSave,
+  coins,
+  manual,
+  onSaveResult,
 }: ItemProps) {
   const canSave =
     typeof window !== "undefined" && typeof window.coinPingApi !== "undefined";
@@ -139,6 +173,21 @@ function DetectedPingItem({
   );
   const bestMatch = matches[0];
   const hasMatch = bestMatch !== undefined;
+  const [resultState, setResultState] = useState<"idle" | "saving" | "saved">("idle");
+  const [resultError, setResultError] = useState<string | null>(null);
+
+  async function saveResult() {
+    if (!onSaveResult) return;
+    setResultError(null);
+    setResultState("saving");
+    try {
+      await onSaveResult(ping, matches);
+      setResultState("saved");
+    } catch (error) {
+      setResultError(error instanceof Error ? error.message : "Could not save the test result.");
+      setResultState("idle");
+    }
+  }
 
   return (
     <li
@@ -151,12 +200,12 @@ function DetectedPingItem({
       <div className="flex items-start justify-between gap-2">
         <div className="min-w-0 flex-1">
           <div className="font-medium text-foreground">
-            {formatTime(ping.detectedAt)}{" "}
-            <span className="font-normal text-muted-foreground">
+            {manual ? "Manual recording" : formatTime(ping.detectedAt)}{" "}
+            {!manual ? <span className="font-normal text-muted-foreground">
               · +{(ping.triggerBandDb - ping.baselineBandDb).toFixed(1)} dB above floor
               · sustained {Math.round(ping.topPeakSustainMs)} ms
               {ping.ambientSubtracted ? " · ambient-subtracted" : ""}
-            </span>
+            </span> : null}
           </div>
           <div className="mt-1 flex flex-wrap items-center gap-x-2 gap-y-0.5 text-muted-foreground">
             {peaksToShow.map((p, idx) => (
@@ -175,9 +224,9 @@ function DetectedPingItem({
             ))}
           </div>
 
-          {hasMatch ? <MatchBanner matches={matches} /> : null}
+          {hasMatch ? <MatchBanner matches={matches} coins={coins} /> : null}
         </div>
-        <Button
+        {onDismiss ? <Button
           type="button"
           variant="ghost"
           size="sm"
@@ -186,7 +235,7 @@ function DetectedPingItem({
           className="-mr-2 -mt-1"
         >
           ×
-        </Button>
+        </Button> : null}
       </div>
 
       <div className="mt-2 flex flex-wrap items-center gap-2">
@@ -199,25 +248,36 @@ function DetectedPingItem({
         >
           {saved ? "Saved · Save again…" : "Save as reference…"}
         </Button>
+        {onSaveResult ? (
+          <Button type="button" size="sm" variant="ghost"
+            onClick={() => void saveResult()} disabled={resultState !== "idle"}>
+            {resultState === "saved" ? "Test result saved" : resultState === "saving" ? "Saving…" : "Save test result"}
+          </Button>
+        ) : null}
         {!canSave ? (
           <span className="text-[11px] text-muted-foreground">
             DB unavailable in this environment.
           </span>
         ) : null}
       </div>
+      {resultError ? <p role="alert" className="mt-1 text-xs text-red-400">{resultError}</p> : null}
     </li>
   );
 }
 
-function MatchBanner({ matches }: { matches: ReferenceMatch[] }) {
+function MatchBanner({ matches, coins }: { matches: ReferenceMatch[]; coins?: readonly CoinSummary[] }) {
   const best = matches[0];
   const others = matches.slice(1, 3);
+  function matchLabel(reference: ReferenceRecord) {
+    const coin = coins?.find((entry) => entry.id === reference.coinId);
+    return coin ? `${coin.name} · ${reference.label}` : reference.label;
+  }
 
   return (
     <div className="mt-2 rounded-sm border border-emerald-500/40 bg-emerald-500/10 px-2 py-1 text-[11px] text-emerald-200">
       <div className="font-medium">
         <span className="mr-1">✓ Match:</span>
-        <span className="text-emerald-100">{best.reference.label}</span>{" "}
+        <span className="text-emerald-100">{matchLabel(best.reference)}</span>{" "}
         <span className="text-emerald-300/80">
           ({best.matchedRefPeakCount}/{best.comparedRefPeakCount} peaks ·{" "}
           {Math.round(best.score * 100)}% · ±{Math.round(best.avgErrorHz)} Hz)
@@ -229,7 +289,7 @@ function MatchBanner({ matches }: { matches: ReferenceMatch[] }) {
           {others
             .map(
               (m) =>
-                `${m.reference.label} (${Math.round(m.score * 100)}%)`,
+                `${matchLabel(m.reference)} (${Math.round(m.score * 100)}%)`,
             )
             .join(" · ")}
         </div>
@@ -242,22 +302,29 @@ type SavePingDialogProps = {
   ping: DetectedPing | null;
   onClose: () => void;
   onSaved: (id: string) => void;
+  coins?: readonly CoinSummary[];
+  selectedCoinId?: number | null;
+  onCreateCoin?: (name: string) => Promise<number>;
 };
 
-function SavePingDialog({ ping, onClose, onSaved }: SavePingDialogProps) {
+function SavePingDialog({ ping, onClose, onSaved, coins, selectedCoinId, onCreateCoin }: SavePingDialogProps) {
   const [label, setLabel] = useState<string>("");
   const [saving, setSaving] = useState<boolean>(false);
   const [error, setError] = useState<string | null>(null);
+  const [coinSelection, setCoinSelection] = useState("");
+  const [coinName, setCoinName] = useState("");
 
   useEffect(() => {
     if (ping) {
       setLabel(defaultLabelFor(ping));
+      setCoinSelection(selectedCoinId?.toString() ?? "");
+      setCoinName("");
       setError(null);
     } else {
       setSaving(false);
       setError(null);
     }
-  }, [ping]);
+  }, [ping, selectedCoinId]);
 
   const handleConfirm = useCallback(async () => {
     if (!ping || saving) return;
@@ -269,8 +336,15 @@ function SavePingDialog({ ping, onClose, onSaved }: SavePingDialogProps) {
     setSaving(true);
     setError(null);
     try {
+      let coinId = coinSelection ? Number(coinSelection) : null;
+      if (coinSelection === "new") {
+        if (!onCreateCoin || !coinName.trim()) throw new Error("Enter a name for the new coin.");
+        coinId = await onCreateCoin(coinName.trim());
+        setCoinSelection(String(coinId));
+      }
       await window.coinPingApi.createReference({
         label: trimmed,
+        ...(coins ? { coinId } : {}),
         peaks: ping.peaks.map((p) => ({
           frequencyHz: p.frequencyHz,
           magnitude: p.magnitude,
@@ -286,7 +360,7 @@ function SavePingDialog({ ping, onClose, onSaved }: SavePingDialogProps) {
     } finally {
       setSaving(false);
     }
-  }, [ping, saving, label, onSaved, onClose]);
+  }, [ping, saving, label, coinSelection, coinName, coins, onCreateCoin, onSaved, onClose]);
 
   const open = ping !== null;
 
@@ -314,6 +388,20 @@ function SavePingDialog({ ping, onClose, onSaved }: SavePingDialogProps) {
 
         {ping ? (
           <div className="space-y-3">
+            {coins ? (
+              <div className="space-y-1">
+                <label htmlFor="save-ping-coin" className="block text-xs font-medium">Catalog coin</label>
+                <select id="save-ping-coin" value={coinSelection} onChange={(event) => setCoinSelection(event.target.value)}
+                  disabled={saving} className="w-full rounded-md border border-border bg-background p-2 text-sm">
+                  <option value="">Unassigned</option>
+                  {coins.filter((coin) => !coin.archived).map((coin) => <option key={coin.id} value={coin.id}>{coin.name}</option>)}
+                  {onCreateCoin ? <option value="new">Create a coin…</option> : null}
+                </select>
+                {coinSelection === "new" ? <input aria-label="New coin name" placeholder="New coin name"
+                  value={coinName} onChange={(event) => setCoinName(event.target.value)} disabled={saving}
+                  className="w-full rounded-md border border-border bg-background p-2 text-sm" /> : null}
+              </div>
+            ) : null}
             <div>
               <label
                 htmlFor="save-ping-label"

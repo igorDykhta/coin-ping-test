@@ -488,6 +488,11 @@ export function useAudioCapture(options: UseAudioCaptureOptions = {}) {
     setState((prev) => ({ ...prev, isStarting: true, error: null }));
 
     try {
+      const requestAccess = typeof window !== "undefined" ? window.coinPingApi?.requestMicrophoneAccess : undefined;
+      if (requestAccess && !(await requestAccess())) {
+        throw new Error("Microphone access is disabled. Enable it in your system privacy settings.");
+      }
+      if (!isCurrentRequest()) return;
       stream = await navigator.mediaDevices.getUserMedia({
         audio: {
           echoCancellation: false,

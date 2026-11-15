@@ -1,17 +1,17 @@
 # Coin Ping Analyzer
 
-Electron desktop app for recording coin ping sounds, visualizing microphone frequencies, matching resonances against known references, and storing correct recordings for future comparison.
+Electron desktop app for cataloging coin variants, comparing their sound and photos, and recording measurements. The catalog stays on your computer.
 
 ## Tech stack
 
 - Electron + React + TypeScript (same layout as [finance-insights](../finance-insights))
 - Vite for the renderer
-- SQLite (`node:sqlite` in the main process) for reference metadata
+- SQLite (`node:sqlite` in the main process) for the catalog, resonance references, and test sessions
 - `@sqlrooms/ui` for UI components
 
 ## Run
 
-Use Node.js 20+ (Vite 8 / Tailwind need it). With [nvm](https://github.com/nvm-sh/nvm):
+Use Node.js 20.19+ or 22.12+ from a Vite-supported release line. With [nvm](https://github.com/nvm-sh/nvm):
 
 ```bash
 nvm use    # reads .nvmrc → Node 20
@@ -38,17 +38,14 @@ yarn exec tsc --noEmit -p tsconfig.json
 yarn exec tsc --noEmit -p tsconfig.electron.json
 ```
 
-The regression suite covers detector timing, microphone lifecycle with mocked browser APIs, ambient calibration, reference saving, and asset resolution for the built Electron page. It does not require microphone access. Verify hardware capture and desktop interactions separately when changing those paths.
+The regression suite covers detector timing, microphone lifecycle, catalog migration, measurements, photo alignment, reference saving, and production asset resolution. The SQLite tests require a shell Node version with `node:sqlite`. Verify hardware capture and desktop interactions when changing those paths.
 
-## Database
+## Workspaces
 
-SQLite file (macOS):
+- **Catalog** has searchable coin cards and editable details. Add obverse and reverse reference photos, optional edge images, and weight, density, and GoldScreenSensor specifications. Add manual readings to test sessions to retain the range used for each assessment.
+- **Sound analysis** compares live or manually recorded pings against a selected coin or the entire reference library. Save peaks to the selected coin as a reference, or record a test result in its history. Existing references can be linked from **Unassigned references**.
+- **Image comparison** aligns a local JPEG or PNG with a reference for the same coin face. Position, rotate, and scale each layer, then save the comparison to reopen it from the coin's test history.
 
-`~/Library/Application Support/coin-ping-test/coin-ping-test.sqlite`
+## Storage and backups
 
-## Planned features
-
-- Record coin ping from microphone
-- Real-time frequency spectrum graph
-- Compare detected resonances to saved references
-- Save a recording as a correct reference for future matching
+On macOS the initial SQLite file is `~/Library/Application Support/coin-ping-test/coin-ping-test.sqlite`. Imported photos are copied into the app library. Use **Back up library** in the Catalog to export the database and photos together. **Restore backup** opens a copy of that folder as the active library and retains the previous library on disk. Saved sound references contain resonance peaks and metadata.

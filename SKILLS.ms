@@ -4,7 +4,7 @@ Repo-specific guidance for developing and debugging this Electron application. R
 
 ## Project context
 
-Coin Ping Analyzer captures microphone audio, displays frequency spectra, detects sustained coin resonances, compares them with saved references, and stores reference peak metadata in SQLite. Live detection, ambient calibration, recording analysis, matching, and reference saving are already implemented despite the README's "Planned features" list.
+Coin Ping Analyzer catalogs coin variants and compares candidate measurements, photos, and resonances against their references. SQLite stores catalog metadata and test history. Electron manages local photo files.
 
 The stack is React 19, TypeScript 6 with strict checking, Vite 8, Electron 41, Tailwind CSS 4, and `@sqlrooms/ui`. Use `package.json` and `yarn.lock` for dependency requirements. Regression tests use Node's built-in test runner. There is no backend HTTP service, lint script, CI workflow, or installer packaging script in this checkout.
 
@@ -14,7 +14,9 @@ Before editing, inspect `git status --short`, `git diff`, and `git diff --cached
 
 | Area | Entry points and responsibilities |
 | --- | --- |
-| App composition | `src/main.tsx`: StrictMode, theme, error boundary. `src/App.tsx`: reference loading, selection, sidebar, and detected-ping state supplied by the live panel. |
+| App composition | `src/main.tsx`: StrictMode, theme, error boundary. `src/App.tsx`: workspace navigation, selected coin, and test-session context. |
+| Catalog | `src/components/CoinCatalog.tsx` and `src/components/CoinDetails.tsx`: cards, edit forms, photos, specifications, and history. |
+| Analysis workspaces | `src/components/SoundWorkspace.tsx`: analyzer, reference association, and matching scope. `src/components/ImageComparison.tsx`: independent layer alignment and saved comparisons. |
 | Audio lifecycle | `src/hooks/useAudioCapture.ts`: microphone stream, AudioContext, analyser, recorder, animation loop, ambient capture, detection, and retained overlays. |
 | Analysis orchestration | `src/components/LiveSpectrumPanel.tsx`: visible range, FFT selection, detection band, recording/live view, and manual-peak context menu. |
 | Canvas rendering | `src/components/SpectrumChart.tsx`: bars, captured spectra, reference markers, peak labels, wheel zoom, and capture progress. |
@@ -25,7 +27,7 @@ Before editing, inspect `git status --short`, `git diff`, and `git diff --cached
 | Ping list and saving | `src/components/DetectedPingsList.tsx`: newest-first display, match banners, dismissal, and save dialog. |
 | Frequency controls | `src/hooks/useFrequencyRange.ts` and `src/components/FrequencyRangeControls.tsx`: persisted range, clamping, numeric inputs, and reset. |
 | Electron boundary | `electron/main.ts`: window, permissions, IPC handlers, DB lifetime. `electron/preload.ts`: narrow renderer API. |
-| Persistence and types | `src-electron/db/coinPingDb.ts`: SQLite schema and validation. `src/types/coinPing.ts`: shared contracts. `src/vite-env.d.ts`: `window.coinPingApi` typing. |
+| Persistence and types | `src-electron/db/coinPingDb.ts` and adjacent schema/validation files: SQLite catalogs and migrations. `electron/catalogFiles.ts`: managed media and backup folders. `src/types/catalog.ts` and `src/types/coinPing.ts`: shared contracts. |
 | Styling and builds | `src/styles.css`, `vite.config.ts`, `tsconfig.json`, and `tsconfig.electron.json`. |
 
 ## Setup and commands
@@ -62,8 +64,10 @@ Electron main/preload changes require a rebuild and process restart; the dev scr
 - Renderer persistence goes through `window.coinPingApi`: `listReferences`, `createReference`, and `deleteReference`, backed by `references:list`, `references:create`, and `references:delete` IPC channels. Extend shared types, preload, main handlers, and consumers together when changing this API; do not expose raw `ipcRenderer`.
 - Renderer imports use extensionless relative paths. Electron and DB sources use `.js` relative import specifiers in TypeScript because they compile with Node16 module resolution into a CommonJS package. Keep the two build configurations distinct.
 - `node:sqlite` runs inside Electron's embedded Node runtime. A successful shell Node version check does not establish that the shell runtime can execute database code; run DB checks with a runtime that actually provides this module.
-- The database path is `path.join(app.getPath("userData"), "coin-ping-test.sqlite")`; the README documents the usual macOS location. Use a temporary database for development checks rather than modifying the user's reference library.
-- The `reference_recordings` table contains `id`, `label`, `peaks_json`, and `created_at`. The DB enables WAL, uses parameterized statements, and checkpoints/closes on shutdown. Preserve existing rows when extending the schema; the current migration only creates the table if absent.
+- `CatalogFiles` resolves the active database under `app.getPath("userData")`. On existing installs it opens the original database and applies versioned migrations. A restored backup activates a new local copy. Use a temporary library for development checks.
+- Keep existing reference IDs and peak data through migrations. Legacy references have a null `coin_id` until linked. The DB enables WAL, uses parameterized statements, and checkpoints/closes on shutdown.
+- Specs describe a coin variant. A test session groups readings, saved photo alignments, and sound results. Store the specification snapshot used to assess a reading so later edits preserve the original decision.
+- The renderer displays managed photos through `coin-media://image/<id>`. Photo imports copy the original and create a thumbnail. Backup and restore move the database and its referenced media together.
 - Reference creation requires a nonblank label, at least one peak, positive finite frequencies, and finite magnitudes. Keep validation at the persistence boundary as well as user-facing form checks; TypeScript types do not validate incoming IPC values.
 - Saved references contain peak metadata, not audio files or spectrum buffers. The save dialog preserves `frequencyHz`, `magnitude`, `kind`, `sustainMs`, and `accumulatedPowerDb`. Preserve classification so matching can prefer long peaks on both sides, while continuing to support older rows without optional fields.
 - The delete API exists, but the current reference sidebar has no delete control. Dismissing a detected ping only removes transient in-memory state.
@@ -127,4 +131,4 @@ For audio, rendering, or persistence changes, exercise the relevant cases in Ele
 
 For numerical changes, prefer deterministic synthetic spectra and timestamps around thresholds, sustain durations, and tolerance boundaries. Keep database checks isolated in a temporary file. Add focused regression coverage when behavior warrants it, and state what was actually checked; compiling does not verify microphone behavior or desktop rendering.
 
-Re-check UI copy against constants when editing these paths: `LiveSpectrumPanel.tsx` currently says to keep quiet for 10 seconds, while `AMBIENT_CAPTURE_MS` and the calibration controls use five seconds. Treat README descriptions and comments as context; resolve discrepancies against executable code and the requested behavior.
+Verify actual capture duration against `AMBIENT_CAPTURE_MS` when editing calibration controls or copy.
