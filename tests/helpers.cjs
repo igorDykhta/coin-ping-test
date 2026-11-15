@@ -121,6 +121,7 @@ function createAudioHarness({ media, resume, MediaRecorder, decodeAudioData } = 
     createAnalyser() {
       return {
         fftSize: 8192,
+        connect() {},
         get frequencyBinCount() { return this.fftSize / 2; },
         getFloatFrequencyData(buffer) { buffer.fill(-40); },
       };

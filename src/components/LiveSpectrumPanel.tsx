@@ -10,6 +10,7 @@ import {
   ContextMenuItem,
   ContextMenuSeparator,
   ContextMenuTrigger,
+  Input,
   cn,
 } from "@sqlrooms/ui";
 
@@ -31,6 +32,7 @@ import {
   LIVE_ANALYZER_MAX_DB,
   LIVE_ANALYZER_MIN_DB,
   LIVE_DISPLAY_BOOST_DB,
+  ABSOLUTE_MAX_DISPLAY_HZ,
   nyquistHz,
   PING_DETECTION_MIN_HZ,
   resolveFftSizeForSpan,
@@ -40,6 +42,7 @@ import { AMBIENT_CAPTURE_MS } from "../lib/ambient";
 export type DetectedPingsExternalState = {
   pings: DetectedPing[];
   enabled: boolean;
+  inactiveMessage?: string;
   clearAll: () => void;
   dismiss: (id: string) => void;
   manualRecording?: DetectedPing;
@@ -61,6 +64,53 @@ type LiveSpectrumPanelProps = {
    */
   selectedReferences?: readonly ReferenceRecord[];
 };
+
+function ManualPeakEntry({ maxHz, onAdd }: {
+  maxHz: number;
+  onAdd: (frequency: number, kind: "long" | "short") => void;
+}) {
+  const [frequency, setFrequency] = useState("");
+  const [kind, setKind] = useState<"long" | "short">("long");
+  const [feedback, setFeedback] = useState<{ text: string; error?: boolean } | null>(null);
+
+  return (
+    <details className="rounded-md border border-border px-3 py-2">
+      <summary className="cursor-pointer text-sm font-medium">Enter a peak manually</summary>
+      <form className="mt-2 space-y-2" noValidate onSubmit={(event) => {
+        event.preventDefault();
+        const hz = Number(frequency);
+        if (!Number.isFinite(hz) || hz < 1 || hz > maxHz) {
+          setFeedback({ text: `Enter a frequency from 1 to ${maxHz} Hz.`, error: true });
+          return;
+        }
+        onAdd(hz, kind);
+        setFrequency("");
+        setFeedback({ text: `Added ${hz} Hz to the latest ping.` });
+      }}>
+        <div className="flex flex-wrap items-end gap-2">
+          <label className="grid gap-1 text-xs text-muted-foreground">
+            Peak frequency (Hz)
+            <Input type="number" inputMode="decimal" step="any" min={1} max={maxHz} required
+              value={frequency} onChange={(event) => { setFrequency(event.currentTarget.value); setFeedback(null); }}
+              className="h-8 w-36 font-mono text-foreground" />
+          </label>
+          <label className="grid gap-1 text-xs text-muted-foreground">
+            Peak duration
+            <select value={kind} onChange={(event) => setKind(event.currentTarget.value === "short" ? "short" : "long")}
+              className="h-8 rounded-md border border-border bg-background px-2 text-sm text-foreground">
+              <option value="long">Long</option>
+              <option value="short">Short</option>
+            </select>
+          </label>
+          <Button type="submit" size="sm" variant="outline">Add peak</Button>
+        </div>
+        {feedback ? <p role={feedback.error ? "alert" : "status"} className={feedback.error ? "text-xs text-red-400" : "text-xs text-muted-foreground"}>
+          {feedback.text}
+        </p> : null}
+      </form>
+    </details>
+  );
+}
 
 export function LiveSpectrumPanel({
   onDetectedPingsChange,
@@ -95,6 +145,8 @@ export function LiveSpectrumPanel({
     setSubtractAmbientEnabled,
     liveSpectrum,
     recordingSpectrum,
+    recordingBlob,
+    recordingIdentity,
     error: captureError,
     startListening,
     stopListening,
@@ -193,9 +245,7 @@ export function LiveSpectrumPanel({
     resetRange();
   }, [clearAmbientProfile, resetRange]);
 
-  const usesAmbientScale = Boolean(
-    displaySpectrum?.ambientSubtracted && subtractAmbientEnabled && ambientProfile,
-  );
+  const usesAmbientScale = Boolean(displaySpectrum?.ambientSubtracted);
 
   const recordingPeaks = useMemo(
     () =>
@@ -219,10 +269,10 @@ export function LiveSpectrumPanel({
   const chartPeaks = recordingSpectrum ? recordingPeaks : latestPingPeaks;
 
   const manualRecording = useMemo<DetectedPing | undefined>(() => {
-    if (!recordingSpectrum || recordingPeaks.length === 0) return undefined;
+    if (!recordingSpectrum || !recordingIdentity || recordingPeaks.length === 0) return undefined;
     return {
-      id: `recording-${Date.now()}`,
-      detectedAt: new Date().toISOString(),
+      id: recordingIdentity.id,
+      detectedAt: recordingIdentity.capturedAt,
       spectrum: recordingSpectrum,
       peaks: recordingPeaks,
       ambientSubtracted: recordingSpectrum.ambientSubtracted ?? false,
@@ -230,7 +280,7 @@ export function LiveSpectrumPanel({
       baselineBandDb: 0,
       topPeakSustainMs: 0,
     };
-  }, [recordingSpectrum, recordingPeaks]);
+  }, [recordingSpectrum, recordingIdentity, recordingPeaks]);
 
   useEffect(() => {
     onSoundControlsChange?.({ isRecording, finishRecording: stopRecording, stopListening });
@@ -238,11 +288,18 @@ export function LiveSpectrumPanel({
 
   // Stream the current detection state out to the parent so the pings list
   // can live elsewhere in the layout (left column under references).
-  const detectionEnabledForList = pingDetectionEnabled && isListening;
+  const detectionEnabledForList = pingDetectionEnabled && isListening && detectionBandValid && !isCapturingAmbient;
+  let detectionInactiveMessage: string | undefined;
+  if (isListening) {
+    if (isCapturingAmbient) detectionInactiveMessage = "Detection paused during ambient calibration.";
+    else if (!detectionBandValid) detectionInactiveMessage = "Adjust the frequency range or enable low-frequency detection.";
+    else if (!pingDetectionEnabled) detectionInactiveMessage = "Auto-detection is off.";
+  }
   useEffect(() => {
     onDetectedPingsChange?.({
       pings: detectedPings,
       enabled: detectionEnabledForList,
+      inactiveMessage: detectionInactiveMessage,
       clearAll: clearDetectedPings,
       dismiss: dismissDetectedPing,
       manualRecording,
@@ -250,6 +307,7 @@ export function LiveSpectrumPanel({
   }, [
     detectedPings,
     detectionEnabledForList,
+    detectionInactiveMessage,
     clearDetectedPings,
     dismissDetectedPing,
     onDetectedPingsChange,
@@ -257,7 +315,7 @@ export function LiveSpectrumPanel({
   ]);
 
   const chartTitle = recordingSpectrum
-    ? subtractAmbientEnabled && ambientProfile
+    ? recordingSpectrum.ambientSubtracted
       ? "Recording (ambient subtracted)"
       : "Recording spectrum"
     : isRecording
@@ -271,6 +329,22 @@ export function LiveSpectrumPanel({
           : undefined;
 
   const nyquist = sampleRate ? nyquistHz(sampleRate) : 24_000;
+  let workspaceStatus = "Capture ambient first, then coin pings spike above the noise floor.";
+  if (isFinalizingRecording) {
+    workspaceStatus = "Analyzing recording…";
+  } else if (recordingSpectrum) {
+    workspaceStatus = `Showing spectrum for the last recording (${recordingPeaks.length} peaks detected).`;
+  } else if (!isListening) {
+    workspaceStatus = "Start listening, capture ambient, then record coin pings.";
+  } else if (isCapturingAmbient) {
+    workspaceStatus = `Keep the room quiet for ${AMBIENT_CAPTURE_MS / 1000} seconds while we measure background noise.`;
+  } else if (isRecording) {
+    workspaceStatus = "Recording… strike the coin, then stop to analyze the ping.";
+  } else if (latestPing || chartOverlaySpectrum || chartAccumulatedOverlay) {
+    workspaceStatus = "Green = peak snapshot · red = time-averaged sustained resonance.";
+  } else if (ambientProfile && subtractAmbientEnabled) {
+    workspaceStatus = "Live view shows signal minus ambient floor; coin pings stand out above zero.";
+  }
 
   return (
     <Card className="flex h-full min-h-0 flex-col">
@@ -322,41 +396,47 @@ export function LiveSpectrumPanel({
                   onClick={startRecording}
                   disabled={isCapturingAmbient || isFinalizingRecording}
                 >
-                  {isFinalizingRecording ? "Analyzing recording…" : "Record ping"}
+                  Record ping
                 </Button>
               ) : (
                 <Button type="button" variant="destructive" onClick={() => void stopRecording()}>
                   Stop recording
                 </Button>
               )}
-              {recordingSpectrum ? (
-                <Button type="button" variant="outline" onClick={clearRecording}>
-                  Clear recording
-                </Button>
-              ) : null}
             </>
           )}
+          {recordingSpectrum || recordingBlob ? (
+            <Button type="button" variant="outline" onClick={clearRecording}>
+              Clear recording
+            </Button>
+          ) : null}
         </div>
       </CardHeader>
       <CardContent className="flex min-h-0 flex-1 flex-col gap-3">
-        <FrequencyRangeControls
-          minHz={minHz}
-          maxHz={maxHz}
-          nyquistHz={nyquist}
-          onApply={applyRange}
-          onReset={resetRangeAndAmbient}
-        />
+        <details className="rounded-md border border-border px-3 py-2">
+          <summary className="cursor-pointer text-sm font-medium">Frequency range and ambient settings</summary>
+          <div className="mt-3 space-y-3">
+            <FrequencyRangeControls
+              minHz={minHz}
+              maxHz={maxHz}
+              nyquistHz={nyquist}
+              onApply={applyRange}
+              onReset={resetRangeAndAmbient}
+            />
 
-        <AmbientControls
-          isListening={isListening}
-          isCapturingAmbient={isCapturingAmbient}
-          ambientProgress={ambientProgress}
-          ambientProfile={ambientProfile}
-          subtractAmbientEnabled={subtractAmbientEnabled}
-          onStartCapture={startAmbientCapture}
-          onClearAmbient={clearAmbientProfile}
-          onSubtractChange={setSubtractAmbientEnabled}
-        />
+            <AmbientControls
+              isListening={isListening}
+              isCapturingAmbient={isCapturingAmbient}
+              captureBlocked={isRecording || isFinalizingRecording}
+              ambientProgress={ambientProgress}
+              ambientProfile={ambientProfile}
+              subtractAmbientEnabled={subtractAmbientEnabled}
+              onStartCapture={startAmbientCapture}
+              onClearAmbient={clearAmbientProfile}
+              onSubtractChange={setSubtractAmbientEnabled}
+            />
+          </div>
+        </details>
 
         {sampleRate !== null ? (
           <p
@@ -387,25 +467,11 @@ export function LiveSpectrumPanel({
               isRecording ? "text-amber-400" : "text-muted-foreground",
             )}
           >
-            {!isListening
-              ? "Start listening, capture ambient, then record coin pings."
-              : isCapturingAmbient
-                ? `Keep the room quiet for ${AMBIENT_CAPTURE_MS / 1000} seconds while we measure background noise.`
-                : isRecording
-                  ? "Recording… strike the coin, then stop to analyze the ping."
-                  : recordingSpectrum
-                    ? `Showing spectrum for the last recording (${recordingPeaks.length} peaks detected).`
-                    : ambientProfile && subtractAmbientEnabled
-                      ? latestPing || chartOverlaySpectrum || chartAccumulatedOverlay
-                        ? "Green = peak snapshot · red = time-averaged sustained resonance."
-                        : "Live view shows signal minus ambient floor; coin pings stand out above zero."
-                      : latestPing || chartOverlaySpectrum || chartAccumulatedOverlay
-                        ? "Green = peak snapshot · red = time-averaged sustained resonance."
-                        : "Capture ambient first, then coin pings spike above the noise floor."}
+            {workspaceStatus}
           </p>
         )}
 
-        <div className="relative min-h-0 flex-1 rounded-md border border-border bg-card">
+        <div className="relative min-h-[320px] flex-1 rounded-md border border-border bg-card">
           <ContextMenu
             onOpenChange={(open) => {
               if (!open) setContextMenuFrequency(null);
@@ -496,7 +562,9 @@ export function LiveSpectrumPanel({
           </div>
         ) : null}
 
-        {captureError ? <p className="text-sm text-red-500">{captureError}</p> : null}
+        {!recordingSpectrum ? <ManualPeakEntry maxHz={Math.min(ABSOLUTE_MAX_DISPLAY_HZ, Math.floor(nyquist))} onAdd={addManualPeak} /> : null}
+
+        {captureError ? <p role="alert" className="text-sm text-red-400">{captureError}</p> : null}
       </CardContent>
     </Card>
   );

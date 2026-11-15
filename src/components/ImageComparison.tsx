@@ -153,14 +153,15 @@ type PaneProps = {
   alignment: ImageAlignment;
   stageSize: number;
   label?: string;
+  adjustable?: boolean;
 };
 
-function ComparisonPane({ photos, layers, alignment, stageSize, label }: PaneProps) {
+function ComparisonPane({ photos, layers, alignment, stageSize, label, adjustable }: PaneProps) {
   const diameter = 2 * alignment.rimRadius * stageSize * alignment.zoom;
   const guidePosition = viewPoint({ x: alignment.guideX ?? 0, y: alignment.guideY ?? 0 }, alignment, stageSize);
   const hasPhoto = layers.some((layer) => photos[layer]);
   return (
-    <div className="coin-compare-pane">
+    <div className="coin-compare-pane" data-adjustable={adjustable || undefined}>
       {label && <span className="coin-compare-pane-label">{label}</span>}
       {layers.map((layer) => {
         const photo = photos[layer];
@@ -244,7 +245,6 @@ export function ImageComparison({
   });
   const [drafts, setDrafts] = useState(() => loadDrafts(initial));
   const [selectedLayer, setSelectedLayer] = useState<Layer>("candidate");
-  const [alternateLayer, setAlternateLayer] = useState<Layer>("candidate");
   const [tool, setTool] = useState<Tool>("align");
   const [pending, setPending] = useState<"import" | "save" | "delete" | null>(null);
   const [removedCandidateIds, setRemovedCandidateIds] = useState<ReadonlySet<number>>(() => new Set());
@@ -268,9 +268,14 @@ export function ImageComparison({
     stageBounds.width / (alignment.view === "side-by-side" ? 2 : 1),
     stageBounds.height,
   );
-  const layer = alignment[selectedLayer];
-  const selectedLayerLocked = selectedLayer === "reference" && alignment.locked;
-  const canAlign = !!photos[selectedLayer] && !selectedLayerLocked;
+  const otherLayer = selectedLayer === "reference" ? "candidate" : "reference";
+  const alternating = alignment.view === "alternate";
+  const activeLayer = alternating && !photos[selectedLayer] && photos[otherLayer] ? otherLayer : selectedLayer;
+  const layer = alignment[activeLayer];
+  const canAlternate = !!(photos.reference && photos.candidate);
+  const canAdjust = (target: Layer) => !!photos[target] && (target !== "reference" || !alignment.locked);
+  const canAlign = canAdjust(activeLayer);
+  const alignMode = alignment.view === "side-by-side" ? "align-panes" : canAlign ? "align" : undefined;
   const requestedFace = requestedSide?.side;
   const sideRequestId = requestedSide?.requestId;
 
@@ -320,23 +325,30 @@ export function ImageComparison({
   }
 
   function adjustLayer(patch: Partial<ImageAlignment[Layer]>) {
-    changeAlignment((old) => ({ ...old, [selectedLayer]: { ...old[selectedLayer], ...patch } }));
+    changeAlignment((old) => ({ ...old, [activeLayer]: { ...old[activeLayer], ...patch } }));
   }
 
   function alternate() {
-    setAlternateLayer((old) => old === "candidate" ? "reference" : "candidate");
+    if (canAlternate) setSelectedLayer(activeLayer === "candidate" ? "reference" : "candidate");
   }
 
   function startDrag(event: PointerEvent<HTMLDivElement>) {
-    if (event.button !== 0 || pending || stageSize <= 0 || (tool === "align" && !canAlign)) return;
-    event.currentTarget.focus();
+    if (event.button !== 0 || pending || stageSize <= 0 || dragRef.current) return;
+    let target: Layer | "pan" = tool === "pan" ? "pan" : activeLayer;
+    if (target !== "pan" && alignment.view === "side-by-side") {
+      const { left, width } = event.currentTarget.getBoundingClientRect();
+      target = event.clientX < left + width / 2 ? "reference" : "candidate";
+      if (photos[target]) setSelectedLayer(target);
+    }
+    event.currentTarget.focus({ preventScroll: true });
+    if (target !== "pan" && !canAdjust(target)) return;
     event.currentTarget.setPointerCapture(event.pointerId);
     dragRef.current = {
       pointerId: event.pointerId,
       face: side,
       clientX: event.clientX,
       clientY: event.clientY,
-      target: tool === "pan" ? "pan" : selectedLayer,
+      target,
       alignment,
       stageSize,
       moved: false,
@@ -364,9 +376,9 @@ export function ImageComparison({
 
   function onStageKey(event: KeyboardEvent<HTMLDivElement>) {
     if (pending) return;
-    if (event.key === " " && alignment.view === "alternate") {
+    if (event.key === " " && alternating && canAlternate) {
       event.preventDefault();
-      alternate();
+      if (!event.repeat) alternate();
       return;
     }
     const directions: Record<string, [number, number]> = {
@@ -379,7 +391,7 @@ export function ImageComparison({
     if (!direction || stageSize <= 0 || (tool === "align" && !canAlign)) return;
     event.preventDefault();
     const [dx, dy] = direction;
-    const target = tool === "pan" ? "pan" : selectedLayer;
+    const target = tool === "pan" ? "pan" : activeLayer;
     const step = event.shiftKey ? 10 : 1;
     const offset = layerOffset(alignment[target], dx * step, dy * step, stageSize, alignment.zoom);
     changeAlignment((old) => ({ ...old, [target]: { ...old[target], ...offset } }));
@@ -398,7 +410,6 @@ export function ImageComparison({
       };
     });
     setSelectedLayer("candidate");
-    setAlternateLayer("candidate");
     setErrorMessage(null);
   }
 
@@ -502,9 +513,9 @@ export function ImageComparison({
               ))}
             </div>
             <div className="coin-compare-actions">
-              {alignment.view === "alternate" && (
+              {alternating && canAlternate && (
                 <Button size="sm" variant="outline" onClick={alternate}>
-                  Show {alternateLayer === "reference" ? "candidate" : "reference"}
+                  Show {activeLayer === "reference" ? "candidate" : "reference"}
                 </Button>
               )}
               <Button
@@ -519,7 +530,7 @@ export function ImageComparison({
           <div
             className="coin-compare-stage"
             data-view={alignment.view}
-            data-tool={tool === "pan" ? "pan" : canAlign ? "align" : undefined}
+            data-tool={tool === "pan" ? "pan" : alignMode}
             ref={stageRef}
             tabIndex={0}
             role="region"
@@ -533,14 +544,14 @@ export function ImageComparison({
           >
             {alignment.view === "side-by-side" ? (
               <>
-                <ComparisonPane label="Reference" photos={photos} layers={["reference"]} alignment={alignment} stageSize={stageSize} />
-                <ComparisonPane label="Candidate" photos={photos} layers={["candidate"]} alignment={alignment} stageSize={stageSize} />
+                <ComparisonPane label="Reference" photos={photos} layers={["reference"]} alignment={alignment} stageSize={stageSize} adjustable={canAdjust("reference")} />
+                <ComparisonPane label="Candidate" photos={photos} layers={["candidate"]} alignment={alignment} stageSize={stageSize} adjustable={canAdjust("candidate")} />
               </>
             ) : (
               <ComparisonPane
-                label={alignment.view === "alternate" ? alternateLayer === "reference" ? "Reference" : "Candidate" : undefined}
+                label={alternating ? activeLayer === "reference" ? "Reference" : "Candidate" : undefined}
                 photos={photos}
-                layers={alignment.view === "alternate" ? [alternateLayer] : ["reference", "candidate"]}
+                layers={alternating ? [activeLayer] : ["reference", "candidate"]}
                 alignment={alignment}
                 stageSize={stageSize}
               />
@@ -625,12 +636,12 @@ export function ImageComparison({
                 <Button
                   key={target}
                   size="sm"
-                  aria-pressed={selectedLayer === target}
-                  variant={selectedLayer === target ? "secondary" : "outline"}
+                  aria-pressed={activeLayer === target}
+                  variant={activeLayer === target ? "secondary" : "outline"}
+                  disabled={!photos[target]}
                   onClick={() => {
                     setSelectedLayer(target);
                     setTool("align");
-                    if (alignment.view === "alternate") setAlternateLayer(target);
                   }}
                 >{target === "reference" ? "Reference" : "Candidate"}</Button>
               ))}
@@ -642,6 +653,9 @@ export function ImageComparison({
               }} />
               Lock reference
             </Label>
+            {activeLayer === "reference" && photos.reference && alignment.locked && (
+              <p className="coin-compare-field text-muted-foreground">Unlock the reference to adjust it.</p>
+            )}
             <div className="coin-compare-fields">
               <NumberField label="X offset (%)" value={layer.x * 100} min={-1000} max={1000} step={0.1} disabled={!canAlign} onCommit={(x) => adjustLayer({ x: x / 100 })} />
               <NumberField label="Y offset (%)" value={layer.y * 100} min={-1000} max={1000} step={0.1} disabled={!canAlign} onCommit={(y) => adjustLayer({ y: y / 100 })} />

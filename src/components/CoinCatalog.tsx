@@ -14,7 +14,8 @@ function CoinCard({ coin, selected, onSelect }: {
 }) {
   const [side, setSide] = useState<CoinFace>("obverse");
   const canFlip = coin.primaryObverseId !== null && coin.primaryReverseId !== null;
-  const shownSide = coin.primaryObverseId === null && coin.primaryReverseId !== null ? "reverse" : side;
+  const onlySide = coin.primaryObverseId === null ? "reverse" : "obverse";
+  const shownSide = canFlip ? side : onlySide;
   const imageId = shownSide === "obverse" ? coin.primaryObverseId : coin.primaryReverseId;
   const identity = [coin.denomination, coinYear(coin), coin.variant].filter(Boolean).join(" · ");
 

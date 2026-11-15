@@ -72,6 +72,8 @@ function MeasurementForm({
   const [notes, setNotes] = useState("");
   const { busy, error, run } = useCatalogAction();
   const eligible = specifications.filter((item) => item.metric === metric && formatRange(item));
+  const chosenSpecification = eligible.find((item) => String(item.id) === specificationId);
+  const unavailableRange = specificationId !== "" && !chosenSpecification;
 
   function changeMetric(next: string) {
     setMetric(next as Metric);
@@ -87,10 +89,11 @@ function MeasurementForm({
         event.preventDefault();
         void run(async () => {
           if (!value || !Number.isFinite(Number(value))) throw new Error("Enter a reading.");
+          if (unavailableRange) throw new Error("Choose another reference range before saving.");
           await window.coinCatalogApi.createMeasurement(sessionId, {
             metric,
             value: Number(value),
-            specificationId: specificationId ? Number(specificationId) : null,
+            specificationId: chosenSpecification?.id ?? null,
             method: method.trim() || (metric === "conductivity" ? "GoldScreenSensor" : undefined),
             notes: notes.trim() || undefined,
           });
@@ -107,6 +110,7 @@ function MeasurementForm({
           <CatalogField label={`Reading (${MEASUREMENT_UNITS[metric]})`} required type="number" step="any" min={0} value={value} onChange={(event) => setValue(event.target.value)} />
           <CatalogSelect label="Reference range" value={specificationId} onChange={setSpecificationId}>
             <option value="">No assessment</option>
+            {unavailableRange && <option value={specificationId} disabled>Previously selected range is unavailable</option>}
             {eligible.map((item) => (
               <option key={item.id} value={item.id}>
                 {[formatRange(item), item.source, item.notes].filter(Boolean).join(" · ")}
@@ -122,9 +126,10 @@ function MeasurementForm({
         </div>
         <CatalogNotes label="Measurement conditions and notes" value={notes} onChange={setNotes} />
       </fieldset>
+      {unavailableRange && <p role="status" className="text-sm text-amber-400">Choose another reference range or select No assessment.</p>}
       <CatalogError error={error} />
       <div className="flex gap-2">
-        <Button size="sm" type="submit" disabled={busy}>Save reading</Button>
+        <Button size="sm" type="submit" disabled={busy || unavailableRange}>Save reading</Button>
         <Button size="sm" type="button" variant="outline" disabled={busy} onClick={onCancel}>Cancel</Button>
       </div>
     </form>

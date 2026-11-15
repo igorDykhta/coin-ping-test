@@ -77,6 +77,7 @@ type AudioCaptureState = {
   liveSpectrum: SpectrumData | null;
   recordingSpectrum: SpectrumData | null;
   recordingBlob: Blob | null;
+  recordingIdentity: { id: string; capturedAt: string } | null;
   error: string | null;
 };
 
@@ -90,6 +91,7 @@ const initialState: AudioCaptureState = {
   liveSpectrum: null,
   recordingSpectrum: null,
   recordingBlob: null,
+  recordingIdentity: null,
   error: null,
 };
 
@@ -97,6 +99,7 @@ type RecordingTake = {
   recorder: MediaRecorder;
   chunks: Blob[];
   startedAt: number;
+  identity: NonNullable<AudioCaptureState["recordingIdentity"]>;
   completion?: Promise<void>;
 };
 
@@ -127,6 +130,7 @@ export function useAudioCapture(options: UseAudioCaptureOptions = {}) {
   const streamRef = useRef<MediaStream | null>(null);
   const startRequestRef = useRef<symbol | null>(null);
   const recordingTakeRef = useRef<RecordingTake | null>(null);
+  const recordingSequence = useRef(0);
   const rafRef = useRef<number | null>(null);
   const floatBufferRef = useRef<Float32Array | null>(null);
   const liveValuesRef = useRef<Float32Array | null>(null);
@@ -571,8 +575,6 @@ export function useAudioCapture(options: UseAudioCaptureOptions = {}) {
         isRecording: false,
         isCapturingAmbient: false,
         ambientProgress: 0,
-        recordingSpectrum: null,
-        recordingBlob: null,
         error: null,
       }));
 
@@ -638,7 +640,7 @@ export function useAudioCapture(options: UseAudioCaptureOptions = {}) {
 
   const startAmbientCapture = useCallback(() => {
     const analyser = analyserRef.current;
-    if (!analyser || !streamRef.current) {
+    if (!analyser || !streamRef.current || capturingAmbientRef.current || recordingTakeRef.current) {
       return;
     }
 
@@ -685,7 +687,12 @@ export function useAudioCapture(options: UseAudioCaptureOptions = {}) {
         if (event.data.size > 0) chunks.push(event.data);
       };
       recorder.start(1000);
-      recordingTakeRef.current = { recorder, chunks, startedAt: performance.now() };
+      recordingTakeRef.current = {
+        recorder,
+        chunks,
+        startedAt: performance.now(),
+        identity: { id: `recording-${++recordingSequence.current}`, capturedAt: new Date().toISOString() },
+      };
     } catch (error) {
       setState((prev) => ({
         ...prev,
@@ -699,6 +706,7 @@ export function useAudioCapture(options: UseAudioCaptureOptions = {}) {
       isRecording: true,
       recordingSpectrum: null,
       recordingBlob: null,
+      recordingIdentity: null,
       error: null,
     }));
   }, []);
@@ -750,7 +758,9 @@ export function useAudioCapture(options: UseAudioCaptureOptions = {}) {
         const spectrum = await computeSpectrumFromBuffer(audioBuffer);
         const recordingSpectrum = applyAmbientToSpectrumData(spectrum, profile, subtract);
         if (mountedRef.current) {
-          setState((prev) => ({ ...prev, recordingSpectrum, recordingBlob: blob }));
+          setState((prev) => ({
+            ...prev, recordingSpectrum, recordingBlob: blob, recordingIdentity: take.identity,
+          }));
         }
       } catch (error) {
         if (mountedRef.current) {
@@ -780,6 +790,8 @@ export function useAudioCapture(options: UseAudioCaptureOptions = {}) {
       ...prev,
       recordingSpectrum: null,
       recordingBlob: null,
+      recordingIdentity: null,
+      error: null,
     }));
   }, []);
 

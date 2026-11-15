@@ -169,6 +169,7 @@ export function SoundWorkspace({
                 coins={coins}
                 selectedCoinId={coinId}
                 enabled={pings.enabled}
+                inactiveMessage={pings.inactiveMessage}
                 onClearAll={pings.clearAll}
                 onDismiss={pings.dismiss}
                 onReferenceSaved={onChanged}

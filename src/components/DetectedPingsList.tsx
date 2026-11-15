@@ -19,6 +19,7 @@ type Props = {
   pings: DetectedPing[];
   references?: ReferenceRecord[];
   enabled: boolean;
+  inactiveMessage?: string;
   onClearAll: () => void;
   onDismiss: (id: string) => void;
   onReferenceSaved?: () => void;
@@ -51,6 +52,7 @@ export function DetectedPingsList({
   pings,
   references = [],
   enabled,
+  inactiveMessage,
   onClearAll,
   onDismiss,
   onReferenceSaved,
@@ -82,7 +84,7 @@ export function DetectedPingsList({
             ? `${ordered.length} detected`
             : enabled
               ? "Listening for spikes…"
-              : "Start listening to begin detection."}
+              : inactiveMessage ?? "Start listening to begin detection."}
           {enabled ? (
             <span className="ml-2 inline-flex items-center gap-1 text-emerald-400">
               <span className="inline-block h-2 w-2 animate-pulse rounded-full bg-emerald-400" />

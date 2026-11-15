@@ -5,6 +5,7 @@
   "main": "dist-electron/electron/main.js",
   "scripts": {
     "test": "node --test tests/*.test.cjs",
+    "test:electron": "yarn build && node tests/electron/run.cjs",
     "check-node": "node scripts/check-node.cjs",
     "dev": "yarn check-node && concurrently -k -s command-1 -n renderer,electron \"yarn dev:renderer\" \"yarn dev:electron\"",
     "dev:renderer": "vite --host 127.0.0.1 --port 5173 --strictPort",

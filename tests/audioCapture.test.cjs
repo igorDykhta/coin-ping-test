@@ -157,3 +157,45 @@ test("switching away after Stop recording preserves earlier chunks and the termi
   assert.equal(h.api.isFinalizingRecording, false);
   assertReleased(h);
 });
+
+test("a finished take survives restarting the microphone until explicitly cleared", async () => {
+  let recorder;
+  class RecordingStub {
+    state = "inactive";
+    constructor() { recorder = this; }
+    start() { this.state = "recording"; }
+    stop() { this.state = "inactive"; }
+  }
+  const h = createAudioHarness({
+    MediaRecorder: RecordingStub,
+    decodeAudioData: () => ({ duration: 0, sampleRate: 48000 }),
+  });
+  await h.api.startListening();
+  h.render().startRecording();
+  h.render().startAmbientCapture();
+  h.render();
+  assert.equal(h.api.isCapturingAmbient, false, "recording should reserve the microphone from ambient calibration");
+
+  recorder.ondataavailable({ data: new Blob(["take"]) });
+  const pending = h.api.stopRecording();
+  recorder.onstop();
+  await new Promise(setImmediate);
+  h.frame(100);
+  await pending;
+  const { recordingIdentity, recordingSpectrum } = h.render();
+  assert.ok(recordingIdentity);
+  assert.ok(recordingSpectrum);
+
+  await h.api.stopListening();
+  await h.render().startListening();
+  h.render();
+  assert.equal(h.api.isListening, true);
+  assert.equal(h.api.recordingIdentity, recordingIdentity);
+  assert.equal(h.api.recordingSpectrum, recordingSpectrum);
+
+  h.api.clearRecording();
+  assert.equal(h.render().recordingIdentity, null);
+  assert.equal(h.api.recordingSpectrum, null);
+  await h.api.stopListening();
+  assertReleased(h);
+});

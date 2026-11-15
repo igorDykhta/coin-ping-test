@@ -98,7 +98,7 @@ export function CoinCatalogPhotos({
           </form>
         )}
         <CatalogError error={error} />
-        <div className="grid gap-4 lg:grid-cols-3">
+        <div className="grid gap-4 md:grid-cols-3">
           {sides.map((side) => {
             const photos = coin.images.filter((image) => image.side === side && image.role === "reference");
             const primary = photos.find((photo) => photo.isPrimary) ?? photos[0];

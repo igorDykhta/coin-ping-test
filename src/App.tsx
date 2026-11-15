@@ -306,7 +306,7 @@ export default function App() {
         <Button variant="ghost" size="sm" onClick={() => { setError(null); setNotice(null); }}>Dismiss</Button>
       </div> : null}
 
-      {page === "catalog" ? <div className="min-h-0 flex-1 overflow-auto p-5">
+      <div hidden={page !== "catalog"} className="min-h-0 flex-1 overflow-auto p-5">
         {loading ? <p className="text-sm text-muted-foreground">Loading coin library…</p> : <CoinCatalog
           coins={coins} selectedCoinId={coinId} onCreate={createCoin}
           onSelect={(id) => navigate("details", () => selectCoin(id))}
@@ -315,7 +315,7 @@ export default function App() {
             <Button variant="outline" size="sm" disabled={backupBusy} onClick={() => void runBackup(true)}>Restore backup</Button>
           </>}
         />}
-      </div> : null}
+      </div>
 
       {page === "details" ? <div className="min-h-0 flex-1 overflow-auto p-5">
         {coin ? <CoinDetails

@@ -6,6 +6,7 @@ import type { AmbientProfile } from "../lib/ambient";
 type AmbientControlsProps = {
   isListening: boolean;
   isCapturingAmbient: boolean;
+  captureBlocked?: boolean;
   ambientProgress: number;
   ambientProfile: AmbientProfile | null;
   subtractAmbientEnabled: boolean;
@@ -17,6 +18,7 @@ type AmbientControlsProps = {
 export function AmbientControls({
   isListening,
   isCapturingAmbient,
+  captureBlocked = false,
   ambientProgress,
   ambientProfile,
   subtractAmbientEnabled,
@@ -55,7 +57,7 @@ export function AmbientControls({
           type="button"
           variant="outline"
           size="sm"
-          disabled={!isListening || isCapturingAmbient}
+          disabled={!isListening || isCapturingAmbient || captureBlocked}
           onClick={onStartCapture}
         >
           {isCapturingAmbient ? `Capturing… ${progressPct}%` : `Capture ambient (${captureSeconds}s)`}

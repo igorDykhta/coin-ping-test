@@ -18,12 +18,25 @@ function find(node, predicate) {
 
 function comparisonHarness(overrides = {}) {
   const runner = createHookRunner();
+  let resize;
+  let width = 0;
+  const capture = [];
+  const surface = {
+    focus() {},
+    setPointerCapture(id) { capture.push(id); },
+    getBoundingClientRect() { return { left: 100, width }; },
+  };
   const load = createLoader({
     react: runner.react,
     "@sqlrooms/ui": { Button: "button", Input: "input", Label: "label" },
     "./ImageComparison.css": {},
   }, {
     window: { confirm: () => true },
+    ResizeObserver: class {
+      constructor(callback) { resize = callback; }
+      observe() {}
+      disconnect() { resize = undefined; }
+    },
   });
   const { ImageComparison } = load("src/components/ImageComparison.tsx");
   const drafts = [];
@@ -40,12 +53,44 @@ function comparisonHarness(overrides = {}) {
     props = { ...props, ...next };
     tree = runner.render(() => ImageComparison(props));
   }
+  const stage = () => find(tree, (node) => node.props.className === "coin-compare-stage").props;
   render();
   return {
     render,
     drafts,
+    capture,
+    stage,
+    resizeStage(nextWidth, height) {
+      width = nextWidth;
+      if (!resize) {
+        stage().ref.current = surface;
+        render({ coinName: "Selected coin" });
+      }
+      resize([{ contentRect: { width, height } }]);
+      render();
+    },
     button(label) {
-      return find(tree, (node) => node.type === "button" && node.props.children === label).props;
+      return find(tree, (node) => node.type === "button" && [node.props.children].flat().join("") === label)?.props;
+    },
+    check(label, checked) {
+      const field = find(tree, (node) => node.type === "label" && node.props.children.at?.(-1) === label);
+      const input = find(field, (node) => node.type === "input" && node.props.type === "checkbox");
+      input.props.onChange({ currentTarget: { checked } });
+      render();
+    },
+    key(key, shiftKey = false) {
+      let prevented = false;
+      stage().onKeyDown({ key, shiftKey, preventDefault() { prevented = true; } });
+      render();
+      return prevented;
+    },
+    drag(x1, y1, x2, y2) {
+      const pointer = (clientX, clientY) => ({ button: 0, currentTarget: surface, pointerId: 1, clientX, clientY });
+      stage().onPointerDown(pointer(x1, y1));
+      render();
+      stage().onPointerMove(pointer(x2, y2));
+      render();
+      stage().onPointerUp(pointer(x2, y2));
     },
     pane() {
       return find(tree, (node) => node.type?.name === "ComparisonPane").props;
@@ -172,4 +217,73 @@ test("layer drag uses zoom-adjusted coordinates and viewport pan leaves the offs
   assert.deepEqual(layer, { x: 0.1, y: -0.04 });
   assert.deepEqual(viewPoint(layer, alignment, 300), { left: 180, top: -54 });
   assert.deepEqual(viewPoint(layer, alignment, 150), { left: 90, top: -27 });
+});
+
+test("alternate mode adjusts the displayed coin and respects the reference lock", () => {
+  const app = comparisonHarness();
+  app.resizeStage(800, 400);
+  app.selectCandidate(candidate.id);
+  app.button("Alternate").onClick();
+  app.render();
+  assert.deepEqual(app.pane().layers, ["candidate"]);
+  assert.equal(app.key("ArrowRight", true), true);
+  assert.equal(app.pane().alignment.candidate.x, 0.025);
+
+  app.button("Show reference").onClick();
+  app.render();
+  assert.deepEqual(app.pane().layers, ["reference"]);
+  assert.equal(app.field("Rotation (°)").disabled, true);
+  assert.equal(app.key("ArrowRight"), false);
+  assert.equal(app.pane().alignment.candidate.x, 0.025);
+
+  app.check("Lock reference", false);
+  assert.equal(app.key("ArrowDown", true), true);
+  assert.equal(app.pane().alignment.reference.y, 0.025);
+  assert.equal(app.pane().alignment.candidate.y, 0);
+  assert.equal(app.key(" "), true);
+  assert.deepEqual(app.pane().layers, ["candidate"]);
+  assert.equal(app.field("Y offset (%)").value, 0);
+});
+
+test("alternate mode shows the available photo when a face has only one image", () => {
+  const app = comparisonHarness();
+  app.button("Alternate").onClick();
+  app.render();
+  assert.deepEqual(app.pane().layers, ["reference"]);
+  assert.equal(app.button("Show candidate"), undefined);
+  assert.equal(app.key(" "), false);
+  app.selectCandidate(candidate.id);
+  assert.deepEqual(app.pane().layers, ["candidate"]);
+  assert.ok(app.button("Show reference"));
+});
+
+test("side-by-side drag edits the pane under the pointer and pans both in Pan view", () => {
+  const app = comparisonHarness();
+  app.resizeStage(800, 400);
+  app.selectCandidate(candidate.id);
+  app.button("Side by side").onClick();
+  app.render();
+  app.drag(250, 200, 290, 200);
+  assert.equal(app.pane().alignment.reference.x, 0);
+  assert.equal(app.pane().alignment.candidate.x, 0);
+  assert.deepEqual(app.capture, []);
+
+  app.check("Lock reference", false);
+  app.drag(250, 200, 290, 180);
+  assert.equal(app.pane().alignment.reference.x, 0.1);
+  assert.equal(app.pane().alignment.reference.y, -0.05);
+  assert.equal(app.pane().alignment.candidate.x, 0);
+  app.drag(550, 200, 570, 200);
+  assert.equal(app.pane().alignment.candidate.x, 0.05);
+  assert.equal(app.pane().alignment.reference.x, 0.1);
+
+  app.button("Pan view").onClick();
+  app.render();
+  app.drag(550, 200, 590, 240);
+  assert.deepEqual(app.pane().alignment.pan, { x: 0.1, y: 0.1 });
+  assert.equal(app.pane().alignment.candidate.x, 0.05);
+  app.button("Undo").onClick();
+  app.render();
+  assert.deepEqual(app.pane().alignment.pan, { x: 0, y: 0 });
+  assert.equal(app.pane().alignment.reference.x, 0.1);
 });

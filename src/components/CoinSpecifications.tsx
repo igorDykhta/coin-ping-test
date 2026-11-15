@@ -51,6 +51,14 @@ function SpecificationForm({
   const { busy, error, run } = useCatalogAction();
   const unit = MEASUREMENT_UNITS[metric];
 
+  function changeMetric(next: string) {
+    if (next === metric) return;
+    setMetric(next as Metric);
+    setNominal("");
+    setMinimum("");
+    setMaximum("");
+  }
+
   async function save() {
     await run(async () => {
       const input = {
@@ -75,7 +83,7 @@ function SpecificationForm({
     <form onSubmit={(event) => { event.preventDefault(); void save(); }} className="space-y-3 rounded-md border border-border p-4">
       <fieldset disabled={busy} className="space-y-3">
         <div className="grid gap-3 sm:grid-cols-2">
-          <CatalogSelect label="Metric" value={metric} onChange={(value) => setMetric(value as Metric)}>
+          <CatalogSelect label="Metric" value={metric} onChange={changeMetric}>
             {metrics.map((item) => <option key={item} value={item}>{metricLabels[item]}</option>)}
           </CatalogSelect>
           <CatalogField label="Source" value={source} onChange={(event) => setSource(event.target.value)} placeholder="Mint, manual, or personal reference" />

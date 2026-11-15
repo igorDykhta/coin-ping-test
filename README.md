@@ -34,11 +34,14 @@ Produces:
 
 ```bash
 yarn test
-yarn exec tsc --noEmit -p tsconfig.json
-yarn exec tsc --noEmit -p tsconfig.electron.json
+yarn tsc --noEmit -p tsconfig.json
+yarn tsc --noEmit -p tsconfig.electron.json
+yarn test:electron
 ```
 
-The regression suite covers detector timing, microphone lifecycle, catalog migration, measurements, photo alignment, reference saving, and production asset resolution. The SQLite tests require a shell Node version with `node:sqlite`. Verify hardware capture and desktop interactions when changing those paths.
+The regression suite covers detector timing, microphone lifecycle, catalog migration, measurements, photo alignment, reference saving, and production asset resolution. The SQLite tests require a shell Node version with `node:sqlite`.
+
+`yarn test:electron` builds and launches the desktop app. It drives catalog forms, photo alignment, recording and saving a sound result, and backup and restore. It requires a graphical desktop and uses a temporary profile, synthetic audio, and test file picker responses. Set `COIN_TEST_SCREENSHOTS` to a directory to retain screenshots for inspection.
 
 ## Workspaces
 
