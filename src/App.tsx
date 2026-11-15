@@ -37,18 +37,23 @@ function toComparisonPhoto(image: CoinImage): ComparisonPhoto | null {
   };
 }
 
-function CoinPhotoWorkspace({ coin, comparison, requestedSide, onOpenCoin, onImport, onSave }: {
+function imagePairKey(referenceId: number, candidateId: number) {
+  return `${referenceId}:${candidateId}`;
+}
+
+function CoinPhotoWorkspace({ coin, comparison, requestedSide, onOpenCoin, onImport, onDeleteCandidate, onSave }: {
   coin: CoinDetail | null;
   comparison?: SavedComparison;
   requestedSide?: PhotoRequest;
   onOpenCoin: () => void;
   onImport: (side: CoinFace) => Promise<ComparisonPhoto | null>;
+  onDeleteCandidate: (id: number) => Promise<void>;
   onSave: (draft: ImageComparisonDraft, comparisonId?: number) => Promise<number>;
 }) {
   const photos = coin?.images ?? [];
-  const saved = useRef<Partial<Record<CoinFace, number>>>(
-    comparison ? { [comparison.side]: comparison.id } : {},
-  );
+  const savedPairs = useRef(new Map<string, number>(comparison
+    ? [[imagePairKey(comparison.referenceImageId, comparison.candidateImageId), comparison.id]]
+    : []));
   let initial: ImageComparisonDraft | undefined;
   if (comparison) {
     const image = photos.find((photo) => photo.id === comparison.candidateImageId);
@@ -73,9 +78,11 @@ function CoinPhotoWorkspace({ coin, comparison, requestedSide, onOpenCoin, onImp
     candidateImages={getPhotos("candidate")}
     initial={initial}
     importCandidate={onImport}
+    onDeleteCandidate={onDeleteCandidate}
     onOpenCoin={coin ? onOpenCoin : undefined}
     onSave={async (draft) => {
-      saved.current[draft.side] = await onSave(draft, saved.current[draft.side]);
+      const key = imagePairKey(draft.referenceImageId, draft.candidate.id);
+      savedPairs.current.set(key, await onSave(draft, savedPairs.current.get(key)));
     }}
   />;
 }
@@ -91,9 +98,9 @@ export default function App() {
   const [notice, setNotice] = useState<string | null>(null);
   const [loading, setLoading] = useState(true);
   const [backupBusy, setBackupBusy] = useState(false);
-  const [photoContext, setPhotoContext] = useState<PhotoContext>();
+  const [activeSessionId, setActiveSessionId] = useState<number>();
+  const [photoComparison, setPhotoComparison] = useState<SavedComparison>();
   const [requestedSide, setRequestedSide] = useState<PhotoRequest>();
-  const [soundSession, setSoundSession] = useState<number>();
   const [soundRequest, setSoundRequest] = useState(0);
   const [navigationBusy, setNavigationBusy] = useState(false);
   const [pendingNavigation, setPendingNavigation] = useState<(() => void) | null>(null);
@@ -102,21 +109,39 @@ export default function App() {
   const detailRequest = useRef(0);
   const libraryRequest = useRef(0);
   const coin = coinDetail?.id === coinId ? coinDetail : null;
+  const isArchived = coin?.archived ?? coins.find((entry) => entry.id === coinId)?.archived ?? false;
+  const soundCoinId = isArchived ? null : coinId;
+  const imageCoin = !isArchived || photoComparison ? coin : null;
+  const sessionLabel = activeSessionId === undefined
+    ? "Current test session"
+    : coin?.sessions.find((entry) => entry.id === activeSessionId)?.label ?? `Test session #${activeSessionId}`;
+
+  const loadCoinDetail = useCallback(async (id: number | null) => {
+    const sequence = ++detailRequest.current;
+    const isCurrent = () => sequence === detailRequest.current && id === selectedCoinRef.current;
+    try {
+      const detail = id === null ? null : await window.coinCatalogApi.getCoin(id);
+      if (isCurrent()) setCoinDetail(detail);
+    } catch (failure) {
+      if (isCurrent()) throw failure;
+    }
+  }, []);
 
   const refresh = useCallback(async (id = selectedCoinRef.current) => {
     const librarySequence = ++libraryRequest.current;
-    const detailSequence = ++detailRequest.current;
-    const [nextCoins, nextReferences, nextCoin] = await Promise.all([
+    const library = Promise.all([
       window.coinCatalogApi.listCoins(),
       window.coinPingApi.listReferences(),
-      id === null ? Promise.resolve(null) : window.coinCatalogApi.getCoin(id),
-    ]);
-    if (librarySequence === libraryRequest.current) {
-      setCoins(nextCoins);
-      setReferences(nextReferences);
-    }
-    if (detailSequence === detailRequest.current && id === selectedCoinRef.current) setCoinDetail(nextCoin);
-  }, []);
+    ]).then(([nextCoins, nextReferences]) => {
+      if (librarySequence === libraryRequest.current) {
+        setCoins(nextCoins);
+        setReferences(nextReferences);
+      }
+    });
+    // A completed edit may belong to a coin the user has already left.
+    const detail = id === selectedCoinRef.current ? loadCoinDetail(id) : undefined;
+    await Promise.all([library, detail]);
+  }, [loadCoinDetail]);
 
   const refreshAfterWrite = useCallback(() => {
     void refresh().catch((failure: unknown) => setError(errorMessage(failure)));
@@ -140,18 +165,11 @@ export default function App() {
     selectedCoinRef.current = id;
     setCoinId(id);
     setCoinDetail(null);
-    setSoundSession(undefined);
-    setPhotoContext(undefined);
+    setActiveSessionId(undefined);
+    setPhotoComparison(undefined);
     setRequestedSide(undefined);
-    if (id === null) {
-      detailRequest.current += 1;
-      return;
-    }
-    const sequence = ++detailRequest.current;
-    void window.coinCatalogApi.getCoin(id).then((detail) => {
-      if (sequence === detailRequest.current) setCoinDetail(detail);
-    }).catch((failure: unknown) => {
-      if (sequence === detailRequest.current) setError(errorMessage(failure));
+    void loadCoinDetail(id).catch((failure: unknown) => {
+      if (id === selectedCoinRef.current) setError(errorMessage(failure));
     });
   }
 
@@ -205,14 +223,16 @@ export default function App() {
 
   function openSound(sessionId?: number) {
     navigate("sound", () => {
-      setSoundSession(sessionId);
+      setActiveSessionId(sessionId);
+      setPhotoComparison((previous) => previous?.sessionId === sessionId ? previous : undefined);
       setSoundRequest((prior) => prior + 1);
     });
   }
 
   function openImages(side?: CoinFace, context?: PhotoContext) {
     navigate("images", () => {
-      setPhotoContext(context);
+      setActiveSessionId(context?.sessionId);
+      setPhotoComparison(context?.comparison);
       if (side) setRequestedSide((prior) => ({ side, requestId: (prior?.requestId ?? 0) + 1 }));
     });
   }
@@ -232,8 +252,8 @@ export default function App() {
   }
 
   async function saveSoundResult(ping: DetectedPing, matches: ReferenceMatch[]) {
-    if (coinId === null) throw new Error("Select a catalog coin before saving a sound result.");
-    const sessionId = await getSession(coinId, soundSession);
+    if (soundCoinId === null) throw new Error("Select an active catalog coin before saving a sound result.");
+    const sessionId = await getSession(soundCoinId, activeSessionId);
     await window.coinCatalogApi.saveSoundResult(sessionId, {
       label: `Sound · ${new Date(ping.detectedAt).toLocaleString()}`,
       peaks: ping.peaks,
@@ -274,8 +294,10 @@ export default function App() {
               onClick={() => navigate(target)}>{label}</Button>;
           })}
         </nav>
-        {coin && (page === "images" || page === "sound") ? (
-          <span className="ml-auto truncate text-sm text-muted-foreground">{coin.name}</span>
+        {coin && ((page === "images" && imageCoin) || (page === "sound" && soundCoinId !== null)) ? (
+          <span className="ml-auto truncate text-sm text-muted-foreground">
+            {coin.name} · {sessionLabel}
+          </span>
         ) : null}
       </header>
 
@@ -305,7 +327,8 @@ export default function App() {
 
       <section hidden={page !== "sound"} aria-label="Sound analysis" className="min-h-0 flex-1 overflow-auto p-4">
         <SoundWorkspace
-          coins={coins} coinId={coinId} references={references} soundRequest={soundRequest}
+          coins={coins} coinId={soundCoinId} references={references} soundRequest={soundRequest}
+          sessionId={activeSessionId}
           onCoinChange={selectCoin} onOpenCoin={openDetails}
           onChanged={refreshAfterWrite} onSaveResult={saveSoundResult}
           onSoundControlsChange={registerSoundControls}
@@ -320,32 +343,37 @@ export default function App() {
       <section hidden={page !== "images"} aria-label="Image comparison" className="min-h-0 flex-1 overflow-auto p-4">
         <label className="mb-3 flex items-center gap-2 text-sm text-muted-foreground">
           Catalog coin
-          <select value={coinId ?? ""} onChange={(event) => selectCoin(event.target.value ? Number(event.target.value) : null)}
+          <select value={imageCoin?.id ?? ""} onChange={(event) => selectCoin(event.target.value ? Number(event.target.value) : null)}
             className="min-w-48 rounded-md border border-border bg-background px-2 py-2 text-foreground">
             <option value="">Select a coin</option>
+            {imageCoin?.archived ? <option value={imageCoin.id} disabled>{imageCoin.name} (Archived)</option> : null}
             {coins.filter((entry) => !entry.archived).map((entry) => <option key={entry.id} value={entry.id}>{entry.name}</option>)}
           </select>
         </label>
         <CoinPhotoWorkspace
-          key={`${coin?.id ?? "none"}:${photoContext?.sessionId ?? "new"}:${photoContext?.comparison?.id ?? "new"}`}
-          coin={coin}
-          comparison={photoContext?.comparison}
+          key={`${imageCoin?.id ?? "none"}:${activeSessionId ?? "new"}:${photoComparison?.id ?? "new"}`}
+          coin={imageCoin}
+          comparison={photoComparison}
           requestedSide={requestedSide}
           onOpenCoin={openDetails}
           onImport={async (side) => {
-            if (coinId === null) return null;
-            const image = await window.coinCatalogApi.importImage({ coinId, side, role: "candidate" });
+            if (!imageCoin) return null;
+            const image = await window.coinCatalogApi.importImage({ coinId: imageCoin.id, side, role: "candidate" });
             if (image) refreshAfterWrite();
             return image ? toComparisonPhoto(image) : null;
           }}
+          onDeleteCandidate={async (id) => {
+            await window.coinCatalogApi.deleteImage(id);
+            refreshAfterWrite();
+          }}
           onSave={async (draft, comparisonId) => {
-            if (coinId === null) throw new Error("Select a catalog coin before saving photos.");
+            if (!imageCoin) throw new Error("Select a catalog coin before saving photos.");
             const input = {
               side: draft.side, referenceImageId: draft.referenceImageId, candidateImageId: draft.candidate.id,
               alignment: draft.alignment, notes: draft.notes,
             };
             const saved = comparisonId === undefined
-              ? await window.coinCatalogApi.createComparison(await getSession(coinId, photoContext?.sessionId), input)
+              ? await window.coinCatalogApi.createComparison(await getSession(imageCoin.id, activeSessionId), input)
               : await window.coinCatalogApi.updateComparison(comparisonId, input);
             refreshAfterWrite();
             return saved.id;

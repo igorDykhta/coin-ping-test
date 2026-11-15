@@ -137,7 +137,7 @@ export class CoinPingDb {
   createReference(input: ReferenceInput): ReferenceRecord {
     requireObject(input, "Reference");
     const coinId = input.coinId ?? null;
-    if (coinId !== null) this.coinRow(coinId);
+    this.requireActiveReferenceCoin(coinId);
     const label = requiredText(input.label, "Label");
     const peaks = validPeaks(input.peaks);
     const row = this.db.prepare(`INSERT INTO reference_recordings (label, peaks_json, coin_id)
@@ -147,11 +147,17 @@ export class CoinPingDb {
 
   linkReference(id: number, coinId: number | null): ReferenceRecord {
     positiveId(id, "Reference");
-    if (coinId !== null) this.coinRow(coinId);
+    this.requireActiveReferenceCoin(coinId);
     const row = this.db.prepare(`UPDATE reference_recordings SET coin_id = ? WHERE id = ?
       RETURNING ${REFERENCE_FIELDS}`).get(coinId, id) as ReferenceRow | undefined;
     if (!row) throw new ValidationError("Reference was not found.");
     return toReferenceRecord(row);
+  }
+
+  private requireActiveReferenceCoin(coinId: number | null): void {
+    if (coinId !== null && this.coinRow(coinId).archived) {
+      throw new ValidationError("Restore the archived coin before assigning a reference to it.");
+    }
   }
 
   deleteReference(id: number): void {
@@ -426,7 +432,12 @@ export class CoinPingDb {
       if (!Number.isFinite(match.score) || match.score < 0 || match.score > 1) {
         throw new ValidationError("Match score must be between 0 and 1.");
       }
-      return { referenceId: positiveId(match.referenceId, "Reference"), label: requiredText(match.label, "Match label"), score: match.score };
+      // The snapshot can combine a coin name with a reference title, including
+      // older titles saved before the limit on each newly entered name.
+      if (typeof match.label !== "string" || !match.label.trim()) {
+        throw new ValidationError("Match label is required.");
+      }
+      return { referenceId: positiveId(match.referenceId, "Reference"), label: match.label.trim(), score: match.score };
     });
     return this.transaction(() => {
       const row = this.db.prepare(`INSERT INTO sound_results (session_id, label, peaks_json, matches_json, notes, created_at)

@@ -155,3 +155,34 @@ run("rejects an imported snapshot containing a modified schema", (t) => {
   modified.close();
   assert.throws(() => CoinPingDb.validateBackup(filename), /unexpected database structure/);
 });
+
+run("stores the full match label for a maximum-length coin name and reference title", (t) => {
+  const db = open(t);
+  const coin = db.createCoin({ name: "C".repeat(200) });
+  const reference = db.createReference({ label: "R".repeat(200), coinId: coin.id, peaks });
+  const session = db.createSession(coin.id, { label: "Match test" });
+  const label = `${coin.name} · ${reference.label}`;
+  const matches = [{ referenceId: reference.id, label, score: 1 }];
+
+  assert.equal(label.length, 403);
+  assert.deepEqual(db.saveSoundResult(session.id, { label: "Strike", peaks, matches }).matches, matches);
+  assert.deepEqual(db.getCoin(coin.id).sessions[0].soundResults[0].matches, matches);
+  assert.throws(() => db.saveSoundResult(session.id, {
+    label: "Strike", peaks, matches: [{ ...matches[0], label: " " }],
+  }), /Match label is required/);
+});
+
+run("an archived coin rejects new reference assignments but allows unlinking", (t) => {
+  const db = open(t);
+  const coin = db.createCoin({ name: "Archived coin" });
+  const assigned = db.createReference({ label: "Assigned", coinId: coin.id, peaks });
+  const unassigned = db.createReference({ label: "Unassigned", peaks });
+  db.archiveCoin(coin.id);
+
+  assert.throws(() => db.createReference({ label: "New", coinId: coin.id, peaks }), /Restore the archived coin/);
+  assert.throws(() => db.linkReference(unassigned.id, coin.id), /Restore the archived coin/);
+  assert.deepEqual(db.listReferences(coin.id), [assigned]);
+  assert.equal(db.linkReference(assigned.id, null).coinId, null);
+  db.restoreCoin(coin.id);
+  assert.equal(db.linkReference(unassigned.id, coin.id).coinId, coin.id);
+});

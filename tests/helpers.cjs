@@ -100,7 +100,7 @@ function deferred() {
   return { promise, resolve, reject };
 }
 
-function createAudioHarness({ media, resume } = {}) {
+function createAudioHarness({ media, resume, MediaRecorder, decodeAudioData } = {}) {
   const runner = createHookRunner();
   const requests = [], streams = [], contexts = [], frames = new Map();
   let now = 10, nextFrame = 0, options = { fftSize: 8192 }, api;
@@ -116,6 +116,8 @@ function createAudioHarness({ media, resume } = {}) {
     async close() { this.state = "closed"; }
     createMediaStreamSource() { return { connect() {} }; }
     createGain() { return { gain: { value: 1 }, connect() {} }; }
+    createBufferSource() { return { connect() {}, start() {} }; }
+    async decodeAudioData(buffer) { return decodeAudioData(buffer); }
     createAnalyser() {
       return {
         fftSize: 8192,
@@ -130,6 +132,7 @@ function createAudioHarness({ media, resume } = {}) {
       return media ? media() : Promise.resolve(makeStream());
     } } },
     AudioContext,
+    MediaRecorder,
     performance: { now: () => now },
     requestAnimationFrame(fn) { frames.set(++nextFrame, fn); return nextFrame; },
     cancelAnimationFrame(id) { frames.delete(id); },

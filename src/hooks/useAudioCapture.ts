@@ -71,6 +71,7 @@ type AudioCaptureState = {
   isStarting: boolean;
   isListening: boolean;
   isRecording: boolean;
+  isFinalizingRecording: boolean;
   isCapturingAmbient: boolean;
   ambientProgress: number;
   liveSpectrum: SpectrumData | null;
@@ -83,12 +84,20 @@ const initialState: AudioCaptureState = {
   isStarting: false,
   isListening: false,
   isRecording: false,
+  isFinalizingRecording: false,
   isCapturingAmbient: false,
   ambientProgress: 0,
   liveSpectrum: null,
   recordingSpectrum: null,
   recordingBlob: null,
   error: null,
+};
+
+type RecordingTake = {
+  recorder: MediaRecorder;
+  chunks: Blob[];
+  startedAt: number;
+  completion?: Promise<void>;
 };
 
 export type UseAudioCaptureOptions = {
@@ -117,14 +126,12 @@ export function useAudioCapture(options: UseAudioCaptureOptions = {}) {
   const analyserRef = useRef<AnalyserNode | null>(null);
   const streamRef = useRef<MediaStream | null>(null);
   const startRequestRef = useRef<symbol | null>(null);
-  const recorderRef = useRef<MediaRecorder | null>(null);
-  const chunksRef = useRef<Blob[]>([]);
+  const recordingTakeRef = useRef<RecordingTake | null>(null);
   const rafRef = useRef<number | null>(null);
   const floatBufferRef = useRef<Float32Array | null>(null);
   const liveValuesRef = useRef<Float32Array | null>(null);
   const lastLiveUiUpdateRef = useRef(0);
   const lastAmbientUiUpdateRef = useRef(0);
-  const recordingStartedAtRef = useRef(0);
   const mountedRef = useRef(true);
 
   const ambientProfileRef = useRef<AmbientProfile | null>(null);
@@ -233,14 +240,18 @@ export function useAudioCapture(options: UseAudioCaptureOptions = {}) {
     startRequestRef.current = null;
     stopAnimation();
     capturingAmbientRef.current = false;
+    const take = recordingTakeRef.current;
+    if (take && !take.completion) {
+      // A take that was never stopped explicitly is being discarded. Takes
+      // already finalizing must retain all chunks through the terminal event.
+      take.recorder.ondataavailable = null;
+      recordingTakeRef.current = null;
+    }
     streamRef.current?.getTracks().forEach((track) => {
       track.onended = null;
       track.stop();
     });
     streamRef.current = null;
-    recorderRef.current = null;
-    chunksRef.current = [];
-    recordingStartedAtRef.current = 0;
   }, [stopAnimation]);
 
   const closeAudioContext = useCallback(async () => {
@@ -453,11 +464,8 @@ export function useAudioCapture(options: UseAudioCaptureOptions = {}) {
         }
       }
 
-      if (
-        recorderRef.current &&
-        recordingStartedAtRef.current > 0 &&
-        now - recordingStartedAtRef.current >= MAX_RECORDING_MS
-      ) {
+      const take = recordingTakeRef.current;
+      if (take && !take.completion && now - take.startedAt >= MAX_RECORDING_MS) {
         setState((prev) => ({
           ...prev,
           error: "Recording stopped automatically after 60 seconds.",
@@ -666,82 +674,103 @@ export function useAudioCapture(options: UseAudioCaptureOptions = {}) {
 
   const startRecording = useCallback(() => {
     const stream = streamRef.current;
-    if (!stream || capturingAmbientRef.current) {
+    if (!stream || capturingAmbientRef.current || recordingTakeRef.current) {
       return;
     }
 
-    chunksRef.current = [];
-    const recorder = new MediaRecorder(stream);
-    recorder.ondataavailable = (event) => {
-      if (event.data.size > 0) {
-        chunksRef.current.push(event.data);
-      }
-    };
-    recorder.start(1000);
-    recorderRef.current = recorder;
-    recordingStartedAtRef.current = performance.now();
+    try {
+      const recorder = new MediaRecorder(stream);
+      const chunks: Blob[] = [];
+      recorder.ondataavailable = (event) => {
+        if (event.data.size > 0) chunks.push(event.data);
+      };
+      recorder.start(1000);
+      recordingTakeRef.current = { recorder, chunks, startedAt: performance.now() };
+    } catch (error) {
+      setState((prev) => ({
+        ...prev,
+        error: error instanceof Error ? error.message : "Could not start the recording.",
+      }));
+      return;
+    }
 
     setState((prev) => ({
       ...prev,
       isRecording: true,
       recordingSpectrum: null,
       recordingBlob: null,
+      error: null,
     }));
   }, []);
 
   const stopRecording = useCallback(async () => {
-    const recorder = recorderRef.current;
-    if (!recorder || recorder.state === "inactive") {
+    const take = recordingTakeRef.current;
+    if (!take) {
       return;
     }
+    if (take.completion) return take.completion;
 
-    recordingStartedAtRef.current = 0;
-    setState((prev) => ({ ...prev, isRecording: false }));
-
-    const blob = await new Promise<Blob>((resolve, reject) => {
-      recorder.onstop = () => {
-        const mimeType = recorder.mimeType || "audio/webm";
-        resolve(new Blob(chunksRef.current, { type: mimeType }));
-      };
-      recorder.onerror = () => reject(new Error("Recording failed."));
-      recorder.stop();
-    });
-
-    recorderRef.current = null;
-    chunksRef.current = [];
-
-    if (!mountedRef.current) {
+    const { recorder, chunks } = take;
+    if (recorder.state === "inactive") {
+      recorder.ondataavailable = null;
+      recordingTakeRef.current = null;
+      setState((prev) => ({ ...prev, isRecording: false, error: "The recording ended before it could be saved." }));
       return;
     }
+    const profile = ambientProfileRef.current;
+    const subtract = subtractEnabledRef.current;
+    setState((prev) => ({
+      ...prev,
+      isRecording: false,
+      isFinalizingRecording: true,
+    }));
 
-    try {
-      const decodeCtx = new AudioContext();
-      const arrayBuffer = await blob.arrayBuffer();
-      const audioBuffer = await decodeCtx.decodeAudioData(arrayBuffer.slice(0));
-      await decodeCtx.close();
+    take.completion = (async () => {
+      let blob: Blob | null = null;
+      try {
+        blob = await new Promise<Blob>((resolve, reject) => {
+          recorder.onstop = () => {
+            const mimeType = recorder.mimeType || "audio/webm";
+            resolve(new Blob(chunks, { type: mimeType }));
+          };
+          recorder.onerror = () => reject(new Error("Recording failed."));
+          recorder.stop();
+        });
+        if (!mountedRef.current) return;
 
-      let recordingSpectrum = await computeSpectrumFromBuffer(audioBuffer);
-      recordingSpectrum = applyAmbientToSpectrumData(
-        recordingSpectrum,
-        ambientProfileRef.current,
-        subtractEnabledRef.current,
-      );
+        const decodeCtx = new AudioContext();
+        let audioBuffer: AudioBuffer;
+        try {
+          audioBuffer = await decodeCtx.decodeAudioData(await blob.arrayBuffer());
+        } finally {
+          await decodeCtx.close();
+        }
+        if (!mountedRef.current) return;
 
-      setState((prev) => ({
-        ...prev,
-        recordingSpectrum,
-        recordingBlob: blob,
-      }));
-    } catch (decodeError) {
-      setState((prev) => ({
-        ...prev,
-        error:
-          decodeError instanceof Error
-            ? decodeError.message
-            : "Could not analyze the recording.",
-        recordingBlob: blob,
-      }));
-    }
+        const spectrum = await computeSpectrumFromBuffer(audioBuffer);
+        const recordingSpectrum = applyAmbientToSpectrumData(spectrum, profile, subtract);
+        if (mountedRef.current) {
+          setState((prev) => ({ ...prev, recordingSpectrum, recordingBlob: blob }));
+        }
+      } catch (error) {
+        if (mountedRef.current) {
+          setState((prev) => ({
+            ...prev,
+            error: error instanceof Error ? error.message : "Could not analyze the recording.",
+            recordingBlob: blob,
+          }));
+        }
+      } finally {
+        recorder.ondataavailable = null;
+        recorder.onstop = null;
+        recorder.onerror = null;
+        if (recordingTakeRef.current === take) {
+          recordingTakeRef.current = null;
+          if (mountedRef.current) setState((prev) => ({ ...prev, isFinalizingRecording: false }));
+        }
+      }
+    })();
+    return take.completion;
   }, []);
 
   stopRecordingRef.current = stopRecording;

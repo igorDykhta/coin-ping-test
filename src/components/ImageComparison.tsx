@@ -36,6 +36,7 @@ type Props = {
   candidateImages?: readonly ComparisonPhoto[];
   requestedSide?: { side: Face; requestId: number };
   importCandidate: (side: Face) => Promise<ComparisonPhoto | null>;
+  onDeleteCandidate?: (id: number) => Promise<void>;
   onSave: (draft: ImageComparisonDraft) => Promise<void>;
   initial?: ImageComparisonDraft | null;
   onOpenCoin?: () => void;
@@ -231,6 +232,7 @@ export function ImageComparison({
   candidateImages = [],
   requestedSide,
   importCandidate,
+  onDeleteCandidate,
   onSave,
   initial,
   onOpenCoin,
@@ -244,14 +246,15 @@ export function ImageComparison({
   const [selectedLayer, setSelectedLayer] = useState<Layer>("candidate");
   const [alternateLayer, setAlternateLayer] = useState<Layer>("candidate");
   const [tool, setTool] = useState<Tool>("align");
-  const [pending, setPending] = useState<"import" | "save" | null>(null);
+  const [pending, setPending] = useState<"import" | "save" | "delete" | null>(null);
+  const [removedCandidateIds, setRemovedCandidateIds] = useState<ReadonlySet<number>>(() => new Set());
   const [errorMessage, setErrorMessage] = useState<string | null>(null);
   const [stageBounds, setStageBounds] = useState({ width: 0, height: 0 });
   const stageRef = useRef<HTMLDivElement>(null);
   const dragRef = useRef<DragState | null>(null);
   const draft = drafts[side];
   const { alignment } = draft;
-  const candidates = candidateImages.filter((photo) => photo.side === side);
+  const candidates = candidateImages.filter((photo) => photo.side === side && !removedCandidateIds.has(photo.id));
   const activeCandidate = draft.candidate;
   if (activeCandidate && !candidates.some((photo) => photo.id === activeCandidate.id)) {
     candidates.unshift(activeCandidate);
@@ -383,13 +386,17 @@ export function ImageComparison({
   }
 
   function selectCandidate(photo?: ComparisonPhoto) {
-    updateDraft(side, (old) => ({
-      ...old,
-      candidate: photo,
-      alignment: { ...old.alignment, candidate: INITIAL_ALIGNMENT.candidate },
-      history: [],
-      saved: false,
-    }));
+    updateDraft(side, (old) => {
+      if (old.candidate?.id === photo?.id) return old;
+      return {
+        ...old,
+        candidate: photo,
+        alignment: { ...old.alignment, candidate: INITIAL_ALIGNMENT.candidate },
+        history: [],
+        notes: old.saved ? "" : old.notes,
+        saved: false,
+      };
+    });
     setSelectedLayer("candidate");
     setAlternateLayer("candidate");
     setErrorMessage(null);
@@ -408,6 +415,25 @@ export function ImageComparison({
     }
   }
 
+  async function removeCandidate() {
+    const candidate = draft.candidate;
+    if (pending || !onDeleteCandidate || !candidate) return;
+    if (!window.confirm(`Remove "${candidate.name}" from this coin's candidate photos?`)) return;
+
+    setPending("delete");
+    setErrorMessage(null);
+    try {
+      await onDeleteCandidate(candidate.id);
+      // The refreshed list can arrive after the deletion completes.
+      setRemovedCandidateIds((previous) => new Set([...previous, candidate.id]));
+      selectCandidate();
+    } catch (error) {
+      setErrorMessage(error instanceof Error ? error.message : "Unable to remove photo.");
+    } finally {
+      setPending(null);
+    }
+  }
+
   async function save() {
     if (!reference || !draft.candidate) return;
     setPending("save");
@@ -420,7 +446,7 @@ export function ImageComparison({
         alignment,
         notes: draft.notes,
       });
-      updateDraft(side, (old) => ({ ...old, saved: true }));
+      updateDraft(side, (old) => ({ ...old, referenceImageId: reference.id, saved: true }));
     } catch (error) {
       setErrorMessage(error instanceof Error ? error.message : "Unable to save comparison.");
     } finally {
@@ -585,6 +611,11 @@ export function ImageComparison({
                 {candidates.map((photo) => <option key={photo.id} value={photo.id}>{photo.name}</option>)}
               </select>
             </label>
+            {draft.candidate && onDeleteCandidate && (
+              <Button size="sm" variant="outline" disabled={!!pending} onClick={() => void removeCandidate()}>
+                {pending === "delete" ? "Removing…" : "Remove candidate photo"}
+              </Button>
+            )}
           </fieldset>
 
           <fieldset disabled={!!pending}>

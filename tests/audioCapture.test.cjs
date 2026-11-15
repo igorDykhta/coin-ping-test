@@ -116,3 +116,44 @@ test("ambient compatibility rejects mismatched buffer dimensions", () => {
   assert.equal(isAmbientCompatible(profile, 48000, 32768), false);
   assert.equal(isAmbientCompatible({ ...profile, values: new Float32Array(16384) }, 48000, 32768), true);
 });
+
+test("switching away after Stop recording preserves earlier chunks and the terminal chunk", async () => {
+  let recorder;
+  let decoded;
+  let stopCalls = 0;
+  class RecordingStub {
+    state = "inactive";
+    constructor() { recorder = this; }
+    start() { this.state = "recording"; }
+    stop() { this.state = "inactive"; stopCalls++; }
+  }
+  const h = createAudioHarness({
+    MediaRecorder: RecordingStub,
+    decodeAudioData(buffer) {
+      decoded = Buffer.from(buffer).toString();
+      return { duration: 0, sampleRate: 48000 };
+    },
+  });
+  await h.api.startListening();
+  h.render().startRecording();
+  recorder.ondataavailable({ data: new Blob(["first"]) });
+
+  const pending = h.render().stopRecording();
+  const alsoPending = h.render().stopRecording();
+  assert.equal(h.render().isRecording, false);
+  assert.equal(h.api.isFinalizingRecording, true);
+  // Leaving the workspace releases the live stream before the terminal events.
+  await h.api.stopListening();
+  assertReleased(h);
+
+  recorder.ondataavailable({ data: new Blob(["-terminal"]) });
+  recorder.onstop();
+  await new Promise(setImmediate);
+  h.frame(100);
+  await Promise.all([pending, alsoPending]);
+  assert.equal(stopCalls, 1);
+  assert.equal(decoded, "first-terminal");
+  assert.equal(await h.render().recordingBlob.text(), "first-terminal");
+  assert.equal(h.api.isFinalizingRecording, false);
+  assertReleased(h);
+});

@@ -27,6 +27,7 @@ type Props = {
   selectedCoinId?: number | null;
   onCreateCoin?: (name: string) => Promise<number>;
   onSaveResult?: (ping: DetectedPing, matches: ReferenceMatch[]) => Promise<void>;
+  resultDestination?: string;
 };
 
 function formatTime(iso: string): string {
@@ -58,6 +59,7 @@ export function DetectedPingsList({
   selectedCoinId,
   onCreateCoin,
   onSaveResult,
+  resultDestination,
 }: Props) {
   const ordered = useMemo(() => [...pings].reverse(), [pings]);
   const [pingToSave, setPingToSave] = useState<DetectedPing | null>(null);
@@ -112,6 +114,7 @@ export function DetectedPingsList({
               onRequestSave={setPingToSave}
               coins={coins}
               onSaveResult={onSaveResult}
+              resultDestination={resultDestination}
             />
           ) : null}
           {ordered.map((ping) => (
@@ -124,6 +127,7 @@ export function DetectedPingsList({
               onRequestSave={setPingToSave}
               coins={coins}
               onSaveResult={onSaveResult}
+              resultDestination={resultDestination}
             />
           ))}
         </ul>
@@ -150,7 +154,10 @@ type ItemProps = {
   coins?: readonly CoinSummary[];
   manual?: boolean;
   onSaveResult?: Props["onSaveResult"];
+  resultDestination?: string;
 };
+
+type ResultSaveState = "saving" | "saved" | { error: string };
 
 function DetectedPingItem({
   ping,
@@ -161,6 +168,7 @@ function DetectedPingItem({
   coins,
   manual,
   onSaveResult,
+  resultDestination = "",
 }: ItemProps) {
   const canSave =
     typeof window !== "undefined" && typeof window.coinPingApi !== "undefined";
@@ -173,19 +181,21 @@ function DetectedPingItem({
   );
   const bestMatch = matches[0];
   const hasMatch = bestMatch !== undefined;
-  const [resultState, setResultState] = useState<"idle" | "saving" | "saved">("idle");
-  const [resultError, setResultError] = useState<string | null>(null);
+  const [resultStates, setResultStates] = useState(() => new Map<string, ResultSaveState>());
+  const resultState = resultStates.get(resultDestination);
+  const resultError = typeof resultState === "object" ? resultState.error : null;
 
   async function saveResult() {
-    if (!onSaveResult) return;
-    setResultError(null);
-    setResultState("saving");
+    if (!onSaveResult || resultState === "saving" || resultState === "saved") return;
+    const setResult = (nextState: ResultSaveState) => {
+      setResultStates((previous) => new Map(previous).set(resultDestination, nextState));
+    };
+    setResult("saving");
     try {
       await onSaveResult(ping, matches);
-      setResultState("saved");
+      setResult("saved");
     } catch (error) {
-      setResultError(error instanceof Error ? error.message : "Could not save the test result.");
-      setResultState("idle");
+      setResult({ error: error instanceof Error ? error.message : "Could not save the test result." });
     }
   }
 
@@ -250,7 +260,7 @@ function DetectedPingItem({
         </Button>
         {onSaveResult ? (
           <Button type="button" size="sm" variant="ghost"
-            onClick={() => void saveResult()} disabled={resultState !== "idle"}>
+            onClick={() => void saveResult()} disabled={resultState === "saving" || resultState === "saved"}>
             {resultState === "saved" ? "Test result saved" : resultState === "saving" ? "Saving…" : "Save test result"}
           </Button>
         ) : null}
@@ -313,18 +323,33 @@ function SavePingDialog({ ping, onClose, onSaved, coins, selectedCoinId, onCreat
   const [error, setError] = useState<string | null>(null);
   const [coinSelection, setCoinSelection] = useState("");
   const [coinName, setCoinName] = useState("");
+  const [createdCoin, setCreatedCoin] = useState<{ id: number; name: string } | null>(null);
+  const activeCoins = coins?.filter((coin) => !coin.archived);
+  const defaultCoinSelection = activeCoins?.some((coin) => coin.id === selectedCoinId)
+    ? String(selectedCoinId) : "";
+  const pendingCoin = createdCoin && !coins?.some((coin) => coin.id === createdCoin.id) ? createdCoin : null;
+  const selectableCoins = pendingCoin ? [...(activeCoins ?? []), pendingCoin] : activeCoins;
+  const visibleCoinSelection = (
+    (coinSelection === "new" && onCreateCoin) ||
+    selectableCoins?.some((coin) => String(coin.id) === coinSelection)
+  ) ? coinSelection : "";
+
+  useEffect(() => {
+    if (createdCoin && !pendingCoin) setCreatedCoin(null);
+  }, [createdCoin, pendingCoin]);
 
   useEffect(() => {
     if (ping) {
       setLabel(defaultLabelFor(ping));
-      setCoinSelection(selectedCoinId?.toString() ?? "");
+      setCoinSelection(defaultCoinSelection);
       setCoinName("");
+      setCreatedCoin(null);
       setError(null);
     } else {
       setSaving(false);
       setError(null);
     }
-  }, [ping, selectedCoinId]);
+  }, [ping, defaultCoinSelection]);
 
   const handleConfirm = useCallback(async () => {
     if (!ping || saving) return;
@@ -336,10 +361,12 @@ function SavePingDialog({ ping, onClose, onSaved, coins, selectedCoinId, onCreat
     setSaving(true);
     setError(null);
     try {
-      let coinId = coinSelection ? Number(coinSelection) : null;
-      if (coinSelection === "new") {
-        if (!onCreateCoin || !coinName.trim()) throw new Error("Enter a name for the new coin.");
-        coinId = await onCreateCoin(coinName.trim());
+      let coinId = visibleCoinSelection ? Number(visibleCoinSelection) : null;
+      if (visibleCoinSelection === "new") {
+        const name = coinName.trim();
+        if (!onCreateCoin || !name) throw new Error("Enter a name for the new coin.");
+        coinId = await onCreateCoin(name);
+        setCreatedCoin({ id: coinId, name });
         setCoinSelection(String(coinId));
       }
       await window.coinPingApi.createReference({
@@ -360,7 +387,7 @@ function SavePingDialog({ ping, onClose, onSaved, coins, selectedCoinId, onCreat
     } finally {
       setSaving(false);
     }
-  }, [ping, saving, label, coinSelection, coinName, coins, onCreateCoin, onSaved, onClose]);
+  }, [ping, saving, label, visibleCoinSelection, coinName, coins, onCreateCoin, onSaved, onClose]);
 
   const open = ping !== null;
 
@@ -391,13 +418,13 @@ function SavePingDialog({ ping, onClose, onSaved, coins, selectedCoinId, onCreat
             {coins ? (
               <div className="space-y-1">
                 <label htmlFor="save-ping-coin" className="block text-xs font-medium">Catalog coin</label>
-                <select id="save-ping-coin" value={coinSelection} onChange={(event) => setCoinSelection(event.target.value)}
+                <select id="save-ping-coin" value={visibleCoinSelection} onChange={(event) => setCoinSelection(event.target.value)}
                   disabled={saving} className="w-full rounded-md border border-border bg-background p-2 text-sm">
                   <option value="">Unassigned</option>
-                  {coins.filter((coin) => !coin.archived).map((coin) => <option key={coin.id} value={coin.id}>{coin.name}</option>)}
+                  {selectableCoins?.map((coin) => <option key={coin.id} value={coin.id}>{coin.name}</option>)}
                   {onCreateCoin ? <option value="new">Create a coin…</option> : null}
                 </select>
-                {coinSelection === "new" ? <input aria-label="New coin name" placeholder="New coin name"
+                {visibleCoinSelection === "new" ? <input aria-label="New coin name" placeholder="New coin name"
                   value={coinName} onChange={(event) => setCoinName(event.target.value)} disabled={saving}
                   className="w-full rounded-md border border-border bg-background p-2 text-sm" /> : null}
               </div>

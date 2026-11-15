@@ -22,6 +22,8 @@ function comparisonHarness(overrides = {}) {
     react: runner.react,
     "@sqlrooms/ui": { Button: "button", Input: "input", Label: "label" },
     "./ImageComparison.css": {},
+  }, {
+    window: { confirm: () => true },
   });
   const { ImageComparison } = load("src/components/ImageComparison.tsx");
   const drafts = [];
@@ -50,6 +52,12 @@ function comparisonHarness(overrides = {}) {
     },
     field(label) {
       return find(tree, (node) => node.type?.name === "NumberField" && node.props.label === label).props;
+    },
+    error() {
+      return find(tree, (node) => node.props.role === "alert")?.props.children;
+    },
+    candidateOption(id) {
+      return find(tree, (node) => node.type === "option" && node.props.value === id);
     },
     selectCandidate(id) {
       const label = find(tree, (node) => node.type === "label" && node.props.children[0]?.props?.children === "Candidate photo");
@@ -110,6 +118,51 @@ test("saving reuses the selected candidate and submits aligned layers and photo 
   assert.equal(app.drafts[0].alignment.candidate.scale, 1.42);
   assert.equal(app.drafts[0].alignment.reference.scale, 1);
   assert.equal(app.button("Save comparison").disabled, true);
+});
+
+test("a saved comparison keeps the reference used at save time when the primary changes", async () => {
+  const replacement = { ...obverse, id: 4, name: "New primary", primary: false };
+  const app = comparisonHarness({ referenceImages: [obverse, replacement, reverse] });
+  app.selectCandidate(candidate.id);
+  app.button("Save comparison").onClick();
+  await Promise.resolve();
+  app.render({
+    referenceImages: [{ ...obverse, primary: false }, { ...replacement, primary: true }, reverse],
+  });
+
+  assert.equal(app.drafts[0].referenceImageId, obverse.id);
+  assert.equal(app.pane().photos.reference.id, obverse.id);
+  assert.equal(app.button("Save comparison").disabled, true);
+});
+
+test("removing an unused candidate clears the workspace and excludes it from stale lists", async () => {
+  const removed = [];
+  const app = comparisonHarness({ async onDeleteCandidate(id) { removed.push(id); } });
+  app.selectCandidate(candidate.id);
+  app.field("Scale (%)").onCommit(140);
+  app.render();
+  app.button("Remove candidate photo").onClick();
+  await Promise.resolve();
+  app.render();
+
+  assert.deepEqual(removed, [candidate.id]);
+  assert.equal(app.pane().photos.candidate, undefined);
+  assert.equal(app.pane().alignment.candidate.scale, 1);
+  assert.equal(app.candidateOption(candidate.id), null);
+  assert.equal(app.button("Save comparison").disabled, true);
+});
+
+test("refusing to remove a candidate used by a saved comparison keeps the photo", async () => {
+  const error = "This image is used by a saved comparison.";
+  const app = comparisonHarness({ async onDeleteCandidate() { throw new Error(error); } });
+  app.selectCandidate(candidate.id);
+  app.button("Remove candidate photo").onClick();
+  await Promise.resolve();
+  app.render();
+
+  assert.equal(app.error(), error);
+  assert.equal(app.pane().photos.candidate.id, candidate.id);
+  assert.ok(app.candidateOption(candidate.id));
 });
 
 test("layer drag uses zoom-adjusted coordinates and viewport pan leaves the offset intact", () => {

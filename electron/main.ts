@@ -9,10 +9,6 @@ import { CatalogFiles } from "./catalogFiles.js";
 const isMac = process.platform === "darwin";
 const devServerUrl = process.env.VITE_DEV_SERVER_URL;
 
-protocol.registerSchemesAsPrivileged([
-  { scheme: "coin-media", privileges: { standard: true, secure: true } },
-]);
-
 let db: CoinPingDb;
 let files: CatalogFiles;
 let writingFiles = false;
@@ -148,29 +144,44 @@ function registerIpcHandlers(): void {
   }));
 }
 
-app.whenReady().then(async () => {
-  files = await CatalogFiles.open(app.getPath("userData"));
-  db = new CoinPingDb(files.databasePath);
-  protocol.handle("coin-media", (request) => files.servePhoto(db, request.url));
-  registerIpcHandlers();
-  createWindow();
-
-  app.on("activate", () => {
-    if (BrowserWindow.getAllWindows().length === 0) createWindow();
-  });
-}).catch((error: unknown) => {
-  dialog.showErrorBox("Could not open the coin library", error instanceof Error ? error.message : String(error));
+if (!app.requestSingleInstanceLock()) {
   app.quit();
-});
+} else {
+  protocol.registerSchemesAsPrivileged([
+    { scheme: "coin-media", privileges: { standard: true, secure: true } },
+  ]);
 
-app.on("window-all-closed", () => {
-  if (!isMac || devServerUrl) app.quit();
-});
+  app.whenReady().then(async () => {
+    files = await CatalogFiles.open(app.getPath("userData"));
+    db = new CoinPingDb(files.databasePath);
+    protocol.handle("coin-media", (request) => files.servePhoto(db, request.url));
+    registerIpcHandlers();
+    createWindow();
 
-app.on("before-quit", () => {
-  try {
-    db?.checkpointAndClose("TRUNCATE");
-  } catch (error) {
-    console.error("Failed to checkpoint/close database on shutdown:", error);
-  }
-});
+    app.on("second-instance", () => {
+      const window = BrowserWindow.getAllWindows()[0] ?? createWindow();
+      if (window.isMinimized()) window.restore();
+      if (isMac) app.focus({ steal: true });
+      window.show();
+      window.focus();
+    });
+    app.on("activate", () => {
+      if (BrowserWindow.getAllWindows().length === 0) createWindow();
+    });
+  }).catch((error: unknown) => {
+    dialog.showErrorBox("Could not open the coin library", error instanceof Error ? error.message : String(error));
+    app.quit();
+  });
+
+  app.on("window-all-closed", () => {
+    if (!isMac || devServerUrl) app.quit();
+  });
+
+  app.on("before-quit", () => {
+    try {
+      db?.checkpointAndClose("TRUNCATE");
+    } catch (error) {
+      console.error("Failed to checkpoint/close database on shutdown:", error);
+    }
+  });
+}

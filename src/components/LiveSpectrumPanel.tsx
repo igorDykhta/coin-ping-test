@@ -87,6 +87,7 @@ export function LiveSpectrumPanel({
     isStarting,
     isListening,
     isRecording,
+    isFinalizingRecording,
     isCapturingAmbient,
     ambientProgress,
     ambientProfile,
@@ -319,9 +320,9 @@ export function LiveSpectrumPanel({
                 <Button
                   type="button"
                   onClick={startRecording}
-                  disabled={isCapturingAmbient}
+                  disabled={isCapturingAmbient || isFinalizingRecording}
                 >
-                  Record ping
+                  {isFinalizingRecording ? "Analyzing recording…" : "Record ping"}
                 </Button>
               ) : (
                 <Button type="button" variant="destructive" onClick={() => void stopRecording()}>

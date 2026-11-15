@@ -19,6 +19,7 @@ const EMPTY_PINGS: DetectedPingsExternalState = {
 type Props = {
   coins: CoinSummary[];
   coinId: number | null;
+  sessionId?: number;
   soundRequest: number;
   references: ReferenceRecord[];
   onCoinChange: (coinId: number | null) => void;
@@ -30,7 +31,7 @@ type Props = {
 };
 
 export function SoundWorkspace({
-  coins, coinId, soundRequest, references, onCoinChange, onOpenCoin, onChanged, onCreateCoin,
+  coins, coinId, sessionId, soundRequest, references, onCoinChange, onOpenCoin, onChanged, onCreateCoin,
   onSaveResult, onSoundControlsChange,
 }: Props) {
   const [pings, setPings] = useState(EMPTY_PINGS);
@@ -173,6 +174,7 @@ export function SoundWorkspace({
                 onReferenceSaved={onChanged}
                 onCreateCoin={onCreateCoin}
                 onSaveResult={coinId !== null ? onSaveResult : undefined}
+                resultDestination={coinId !== null ? `${coinId}:${sessionId ?? "automatic"}` : undefined}
               />
             </CardContent>
           </Card>
