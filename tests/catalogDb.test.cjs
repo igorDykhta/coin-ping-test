@@ -115,6 +115,45 @@ run("stores range decisions and the original specification in a session", (t) =>
   assert.equal(db.getCoin(coin.id).specifications.length, 0);
 });
 
+run("corrects a reading in its own session and reassesses against the saved range", (t) => {
+  const db = open(t);
+  const coin = db.createCoin({ name: "Crown" });
+  const firstSpecimen = db.createSession(coin.id, { label: "First specimen" });
+  const secondSpecimen = db.createSession(coin.id, { label: "Second specimen" });
+  const original = db.createSpecification(coin.id, { metric: "weight", min: 30, max: 32 });
+  const replacement = db.createSpecification(coin.id, { metric: "weight", min: 32, max: 34 });
+  const measuredAt = "2026-11-08T11:30:00.000Z";
+  const reading = db.createMeasurement(firstSpecimen.id, {
+    metric: "weight", value: 35, specificationId: original.id, measuredAt, method: "Bench scale",
+  });
+  db.updateSpecification(original.id, { metric: "weight", min: 40, max: 42 });
+  db.deleteSpecification(original.id);
+
+  const correction = { metric: "weight", value: 31, specificationId: original.id, notes: "Corrected the transcription" };
+  assert.throws(() => db.updateMeasurement(secondSpecimen.id, reading.id, correction), /not found in this test session/);
+  assert.throws(() => db.updateMeasurement(firstSpecimen.id, reading.id, { ...correction, value: -31 }), /valid weight value/);
+  assert.throws(() => db.updateMeasurement(firstSpecimen.id, reading.id, { ...correction, metric: "density", specificationId: replacement.id }), /specification for this coin/);
+  assert.deepEqual(db.getCoin(coin.id).sessions.find((session) => session.id === firstSpecimen.id).measurements, [reading]);
+  const corrected = db.updateMeasurement(firstSpecimen.id, reading.id, correction);
+  assert.equal(corrected.id, reading.id);
+  assert.equal(corrected.sessionId, firstSpecimen.id);
+  assert.equal(corrected.measuredAt, measuredAt);
+  assert.equal(corrected.notes, correction.notes);
+  assert.equal(corrected.method, undefined);
+  assert.equal(corrected.status, "within");
+  assert.deepEqual(corrected.specification, original);
+
+  const switched = db.updateMeasurement(firstSpecimen.id, reading.id, { ...correction, specificationId: replacement.id });
+  assert.equal(switched.status, "outside");
+  assert.deepEqual(switched.specification, replacement);
+  const unassessed = db.updateMeasurement(firstSpecimen.id, reading.id, { ...correction, specificationId: null });
+  assert.equal(unassessed.status, "not-assessed");
+  assert.equal(unassessed.specification, null);
+  const sessions = db.getCoin(coin.id).sessions;
+  assert.deepEqual(sessions.find((session) => session.id === firstSpecimen.id).measurements, [unassessed]);
+  assert.deepEqual(sessions.find((session) => session.id === secondSpecimen.id).measurements, []);
+});
+
 run("saves and restores independently aligned photos, protects referenced media, and restores the catalog backup", async (t) => {
   const { dir, open } = fileFixture(t);
   const filename = path.join(dir, "catalog.sqlite");

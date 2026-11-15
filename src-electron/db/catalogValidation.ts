@@ -1,7 +1,23 @@
-import type { ComparisonInput, CoinInput, ImageAlignment, LayerTransform, Metric, SpecificationInput } from "../../src/types/catalog.js";
+import { types } from "node:util";
+import type { ComparisonInput, CoinInput, ImageAlignment, LayerTransform, Metric, SoundAudio, SpecificationInput } from "../../src/types/catalog.js";
 import type { ResonancePeak } from "../../src/types/coinPing.js";
 
 export class ValidationError extends Error {}
+
+export const MAX_SOUND_AUDIO_BYTES = 16 * 1024 * 1024;
+export const SOUND_AUDIO_TYPES = ["audio/webm", "audio/ogg", "audio/mp4", "audio/wav"];
+
+export function validSoundAudio(input: SoundAudio): SoundAudio {
+  requireObject(input, "Sound recording");
+  const mimeType = typeof input.mimeType === "string" ? input.mimeType.split(";", 1)[0].trim().toLowerCase() : "";
+  if (!SOUND_AUDIO_TYPES.includes(mimeType)) {
+    throw new ValidationError("Unsupported sound recording format.");
+  }
+  if (!types.isUint8Array(input.bytes) || input.bytes.byteLength === 0 || input.bytes.byteLength > MAX_SOUND_AUDIO_BYTES) {
+    throw new ValidationError("Sound recording must contain audio data and be at most 16 MiB.");
+  }
+  return { mimeType, bytes: input.bytes };
+}
 
 export function requireObject(input: unknown, label: string): void {
   if (typeof input !== "object" || input === null || Array.isArray(input)) {

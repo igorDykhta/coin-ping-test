@@ -12,7 +12,7 @@ import {
 
 import { findMatchingReferences, type ReferenceMatch } from "../lib/coinMatcher";
 import type { DetectedPing } from "../lib/pingDetector";
-import type { CoinSummary } from "../types/catalog";
+import type { CoinSummary, SoundAudio } from "../types/catalog";
 import type { ReferenceRecord, ResonancePeak } from "../types/coinPing";
 
 type Props = {
@@ -27,7 +27,7 @@ type Props = {
   coins?: readonly CoinSummary[];
   selectedCoinId?: number | null;
   onCreateCoin?: (name: string) => Promise<number>;
-  onSaveResult?: (ping: DetectedPing, matches: ReferenceMatch[]) => Promise<void>;
+  onSaveResult?: (ping: DetectedPing, matches: ReferenceMatch[], audio?: SoundAudio) => Promise<void>;
   resultDestination?: string;
 };
 
@@ -207,7 +207,12 @@ function DetectedPingItem({
     };
     setResult("saving");
     try {
-      await onSaveResult(ping, matches);
+      if (ping.audioClip) {
+        const bytes = new Uint8Array(await ping.audioClip.arrayBuffer());
+        await onSaveResult(ping, matches, { mimeType: ping.audioClip.type, bytes });
+      } else {
+        await onSaveResult(ping, matches);
+      }
       setResult("saved");
     } catch (error) {
       setResult({ error: error instanceof Error ? error.message : "Could not save the test result." });
@@ -233,6 +238,7 @@ function DetectedPingItem({
             </span> : null}
           </div>
           <div className="mt-1 flex flex-wrap items-center gap-x-2 gap-y-0.5 text-muted-foreground">
+            {ping.peaks.length === 0 ? <span>No peaks in the selected range.</span> : null}
             {peaksToShow.map((p, idx) => (
               <span key={idx} className="font-mono">
                 {formatPeak(p)}
@@ -264,7 +270,7 @@ function DetectedPingItem({
       </div>
 
       <div className="mt-2 flex flex-wrap items-center gap-2">
-        <Button
+        {ping.peaks.length > 0 ? <Button
           type="button"
           size="sm"
           variant={saved ? "outline" : "default"}
@@ -272,7 +278,7 @@ function DetectedPingItem({
           disabled={!canSave}
         >
           {saved ? "Saved · Save again…" : "Save as reference…"}
-        </Button>
+        </Button> : null}
         {onSaveResult ? (
           <Button type="button" size="sm" variant="ghost"
             onClick={() => void saveResult()} disabled={resultState === "saving" || resultState === "saved"}>

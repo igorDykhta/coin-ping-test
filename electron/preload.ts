@@ -32,9 +32,11 @@ const coinCatalogApi: CoinCatalogApi = {
   createSession: catalogMethod("createSession"),
   updateSession: catalogMethod("updateSession"),
   createMeasurement: catalogMethod("createMeasurement"),
+  updateMeasurement: catalogMethod("updateMeasurement"),
   createComparison: catalogMethod("createComparison"),
   updateComparison: catalogMethod("updateComparison"),
   saveSoundResult: catalogMethod("saveSoundResult"),
+  getSoundAudio: catalogMethod("getSoundAudio"),
   exportBackup: catalogMethod("exportBackup"),
   importBackup: catalogMethod("importBackup"),
 };

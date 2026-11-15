@@ -275,15 +275,18 @@ export function LiveSpectrumPanel({
   const chartPeaks = recordingView ? recordingPeaks : latestPingPeaks;
 
   const manualRecording = useMemo<DetectedPing | undefined>(() => {
-    if (!recordingSpectrum || !recordingIdentity || recordingPeaks.length === 0) return undefined;
+    if (!recordingSpectrum || !recordingIdentity) return undefined;
+    const audioClip = recordingBlob?.size ? recordingBlob : undefined;
+    if (!audioClip && recordingPeaks.length === 0) return undefined;
     return {
       id: recordingIdentity.id,
       detectedAt: recordingIdentity.capturedAt,
+      audioClip,
       spectrum: recordingSpectrum,
       peaks: recordingPeaks,
       ambientSubtracted: recordingSpectrum.ambientSubtracted ?? false,
     };
-  }, [recordingSpectrum, recordingIdentity, recordingPeaks]);
+  }, [recordingSpectrum, recordingIdentity, recordingBlob, recordingPeaks]);
 
   useEffect(() => {
     onSoundControlsChange?.({ isRecording, finishRecording: stopRecording, stopListening });

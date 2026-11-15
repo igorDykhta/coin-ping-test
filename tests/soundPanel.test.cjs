@@ -79,6 +79,7 @@ test("adjusting the displayed frequency range retains the completed recording id
   assert.equal(app.detection.manualRecording.id, recordingIdentity.id);
   assert.equal(app.detection.manualRecording.detectedAt, recordingIdentity.capturedAt);
   assert.equal(app.detection.manualRecording.peaks[0].frequencyHz, 6000);
+  assert.equal(app.detection.manualRecording.audioClip, app.model.recordingBlob);
 
   // The playback view can be cleared even when listening has already stopped.
   assert.ok(app.button("Start listening"));
@@ -86,6 +87,18 @@ test("adjusting the displayed frequency range retains the completed recording id
   app.render();
   assert.equal(app.detection.manualRecording, undefined);
   assert.equal(app.button("Clear recording"), undefined);
+});
+
+test("a recorded clip can be saved when the selected band has no peaks", () => {
+  const recordingBlob = new Blob(["coin ping"], { type: "audio/webm" });
+  const app = panelHarness({
+    recordingSpectrum: { values: new Float32Array(4096).fill(-110), sampleRate: 48_000, fftSize: 8192 },
+    recordingIdentity: { id: "quiet-take", capturedAt: "2026-01-01T10:00:00.000Z" },
+    recordingBlob,
+  });
+  app.render();
+  assert.deepEqual(app.detection.manualRecording.peaks, []);
+  assert.equal(app.detection.manualRecording.audioClip, recordingBlob);
 });
 
 test("restarting listening shows the new input without losing the retained recording or its frequency range", () => {

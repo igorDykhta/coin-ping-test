@@ -44,6 +44,7 @@ export type PingDetectorConfig = {
 export type DetectedPing = {
   id: string;
   detectedAt: string;
+  audioClip?: Blob;
   /** Max-hold spectrum captured during the ping window. */
   spectrum: SpectrumData;
   /**

@@ -11,9 +11,11 @@ import { CoinTestHistory, type CoinComparisonContext } from "./CoinTestHistory";
 
 export type CoinDetailsProps = {
   coin: CoinDetail;
+  activeSessionId?: number;
   onBack(): void;
   onSound(sessionId?: number): void;
   onCompare(side?: CoinFace, context?: CoinComparisonContext): void;
+  onStartSpecimen(): void;
   onChanged(): Promise<void>;
 };
 
@@ -69,13 +71,14 @@ function CoinSoundReferences({
   );
 }
 
-export function CoinDetails({ coin, onBack, onSound, onCompare, onChanged }: CoinDetailsProps) {
+export function CoinDetails({ coin, activeSessionId, onBack, onSound, onCompare, onStartSpecimen, onChanged }: CoinDetailsProps) {
   const [editing, setEditing] = useState(false);
   const { busy, error, run } = useCatalogAction();
   const identity = [
     ["Country", coin.country], ["Denomination", coin.denomination],
     ["Year", coinYear(coin)], ["Mint", coin.mint], ["Variant", coin.variant], ["Composition", coin.composition],
   ].filter(([, value]) => value);
+  const activeSession = !coin.archived && coin.sessions.find(({ id }) => id === activeSessionId);
 
   function toggleArchive() {
     void run(async () => {
@@ -93,15 +96,17 @@ export function CoinDetails({ coin, onBack, onSound, onCompare, onChanged }: Coi
         <div className="min-w-0">
           <h1 id="coin-details-title" className="break-words text-2xl font-semibold tracking-tight">{coin.name}</h1>
           {coin.archived && <Badge className="mt-2" variant="secondary">Archived</Badge>}
+          {activeSession && <p className="mt-1 text-sm text-muted-foreground">Active specimen · {activeSession.label}</p>}
         </div>
         <div className="flex flex-wrap gap-2">
           {!coin.archived && (
             <>
+              <Button onClick={onStartSpecimen}>Start new specimen test</Button>
               <Button variant="outline" onClick={() => onCompare()}>Compare photos</Button>
               <Button variant="outline" onClick={() => onSound()}>Record / compare sound</Button>
             </>
           )}
-          <Button onClick={() => setEditing(true)} disabled={editing}>Edit details</Button>
+          <Button variant="outline" onClick={() => setEditing(true)} disabled={editing}>Edit details</Button>
         </div>
       </header>
       <Card>
@@ -141,10 +146,10 @@ export function CoinDetails({ coin, onBack, onSound, onCompare, onChanged }: Coi
           <CatalogError error={error} />
         </CardContent>
       </Card>
+      <CoinTestHistory coin={coin} onChanged={onChanged} onCompare={onCompare} onSound={onSound} />
       <CoinCatalogPhotos coin={coin} onChanged={onChanged} onCompare={(side) => onCompare(side)} />
       <CoinSpecifications coinId={coin.id} specifications={coin.specifications} onChanged={onChanged} />
       <CoinSoundReferences coin={coin} onChanged={onChanged} onSound={() => onSound()} />
-      <CoinTestHistory coin={coin} onChanged={onChanged} onCompare={onCompare} onSound={onSound} />
     </section>
   );
 }

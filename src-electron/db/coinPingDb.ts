@@ -3,13 +3,13 @@ import { backup, DatabaseSync, type SQLInputValue } from "node:sqlite";
 import type {
   CoinDetail, CoinImage, CoinInput, CoinSummary, ComparisonInput, ImageAlignment,
   ImageComparison, ImageImportInput, Measurement, MeasurementInput, MeasurementStatus,
-  Session, SessionInput, SoundResult, SoundResultInput, Specification, SpecificationInput,
+  Session, SessionInput, SoundAudio, SoundResult, SoundResultInput, Specification, SpecificationInput,
 } from "../../src/types/catalog.js";
 import type { ReferenceInput, ReferenceRecord, ResonancePeak } from "../../src/types/coinPing.js";
 import { CATALOG_SCHEMA_VERSION, migrateCatalog, schemaVersion } from "./catalogSchema.js";
 import {
   coinValues, comparisonAlignment, isAssetKey, metricValue, optionalText, positiveId,
-  requiredText, requireObject, specificationValues, validMetric, validPeaks, validTimestamp,
+  requiredText, requireObject, specificationValues, validMetric, validPeaks, validSoundAudio, validTimestamp,
   ValidationError,
 } from "./catalogValidation.js";
 
@@ -21,7 +21,7 @@ type ImageRow = Omit<CoinImage, "isPrimary"> & { isPrimary: number; assetKey: st
 type SessionRow = Omit<Session, "measurements" | "comparisons" | "soundResults">;
 type MeasurementRow = Omit<Measurement, "specification" | "specificationId"> & { specificationJson: string | null };
 type ComparisonRow = Omit<ImageComparison, "alignment"> & { alignmentJson: string };
-type SoundResultRow = Omit<SoundResult, "peaks" | "matches"> & { peaksJson: string; matchesJson: string | null };
+type SoundResultRow = Omit<SoundResult, "peaks" | "matches" | "hasAudio"> & { peaksJson: string; matchesJson: string | null };
 
 const REFERENCE_FIELDS = "id, label, coin_id AS coinId, peaks_json AS peaksJson, created_at AS createdAt";
 const SPECIFICATION_FIELDS = "id, coin_id AS coinId, metric, nominal, min, max, source, notes";
@@ -84,9 +84,9 @@ function toComparison({ alignmentJson, ...row }: ComparisonRow): ImageComparison
   return { ...withoutNulls(row, ["notes"]), alignment };
 }
 
-function toSoundResult({ peaksJson, matchesJson, ...row }: SoundResultRow): SoundResult {
+function toSoundResult({ peaksJson, matchesJson, ...row }: SoundResultRow, hasAudio: boolean): SoundResult {
   const matches: SoundResult["matches"] = matchesJson ? JSON.parse(matchesJson) : undefined;
-  return { ...withoutNulls(row, ["notes"]), peaks: parsePeaks(peaksJson), matches };
+  return { ...withoutNulls(row, ["notes"]), peaks: parsePeaks(peaksJson), matches, hasAudio };
 }
 
 export class CoinPingDb {
@@ -323,8 +323,11 @@ export class CoinPingDb {
          WHERE session_id = ? ORDER BY measured_at DESC, id DESC`).all(row.id) as MeasurementRow[]).map(toMeasurement),
       comparisons: (this.db.prepare(`SELECT ${COMPARISON_FIELDS} FROM image_comparisons
          WHERE session_id = ? ORDER BY updated_at DESC, id DESC`).all(row.id) as ComparisonRow[]).map(toComparison),
-      soundResults: (this.db.prepare(`SELECT ${SOUND_FIELDS} FROM sound_results
-         WHERE session_id = ? ORDER BY created_at DESC, id DESC`).all(row.id) as SoundResultRow[]).map(toSoundResult),
+      soundResults: (this.db.prepare(`SELECT ${SOUND_FIELDS}, EXISTS (
+         SELECT 1 FROM sound_result_audio WHERE sound_result_id = sound_results.id
+       ) AS hasAudio FROM sound_results WHERE session_id = ? ORDER BY created_at DESC, id DESC`)
+        .all(row.id) as (SoundResultRow & { hasAudio: number })[])
+        .map(({ hasAudio, ...result }) => toSoundResult(result, Boolean(hasAudio))),
     };
   }
 
@@ -357,12 +360,14 @@ export class CoinPingDb {
     this.db.prepare("UPDATE test_sessions SET updated_at = ? WHERE id = ?").run(new Date().toISOString(), id);
   }
 
-  createMeasurement(sessionId: number, input: MeasurementInput): Measurement {
-    const session = this.sessionRow(sessionId);
+  private measurementValues(session: SessionRow, input: MeasurementInput, previous?: Measurement): SQLInputValue[] {
     requireObject(input, "Measurement");
     const metric = validMetric(input.metric);
     const value = metricValue(metric, input.value, "Measurement");
-    const specification = input.specificationId == null ? null : this.getSpecification(input.specificationId);
+    const original = previous?.metric === metric ? previous.specification : null;
+    const specification = input.specificationId === undefined || input.specificationId === original?.id
+      ? original
+      : input.specificationId === null ? null : this.getSpecification(input.specificationId);
     if (specification && (specification.coinId !== session.coinId || specification.metric !== metric)) {
       throw new ValidationError("Choose a specification for this coin and measurement type.");
     }
@@ -372,11 +377,32 @@ export class CoinPingDb {
       const above = specification.max !== undefined && value > specification.max;
       status = below || above ? "outside" : "within";
     }
+    return [metric, value, specification ? JSON.stringify(specification) : null, status,
+      optionalText(input.method, "Method"), optionalText(input.notes, "Notes", 10_000),
+      validTimestamp(input.measuredAt === undefined ? previous?.measuredAt : input.measuredAt)];
+  }
+
+  createMeasurement(sessionId: number, input: MeasurementInput): Measurement {
     return this.transaction(() => {
+      const values = this.measurementValues(this.sessionRow(sessionId), input);
       const row = this.db.prepare(`INSERT INTO session_measurements (session_id, metric, value,
         specification_json, status, method, notes, measured_at) VALUES (?, ?, ?, ?, ?, ?, ?, ?) RETURNING ${MEASUREMENT_FIELDS}`)
-        .get(sessionId, metric, value, specification ? JSON.stringify(specification) : null, status,
-          optionalText(input.method, "Method"), optionalText(input.notes, "Notes", 10_000), validTimestamp(input.measuredAt)) as MeasurementRow;
+        .get(sessionId, ...values) as MeasurementRow;
+      this.touchSession(sessionId);
+      return toMeasurement(row);
+    });
+  }
+
+  updateMeasurement(sessionId: number, id: number, input: MeasurementInput): Measurement {
+    return this.transaction(() => {
+      const session = this.sessionRow(sessionId);
+      const previous = this.db.prepare(`SELECT ${MEASUREMENT_FIELDS} FROM session_measurements
+        WHERE id = ? AND session_id = ?`).get(positiveId(id, "Reading"), sessionId) as MeasurementRow | undefined;
+      if (!previous) throw new ValidationError("Reading was not found in this test session.");
+      const values = this.measurementValues(session, input, toMeasurement(previous));
+      const row = this.db.prepare(`UPDATE session_measurements SET metric = ?, value = ?, specification_json = ?,
+        status = ?, method = ?, notes = ?, measured_at = ? WHERE id = ? RETURNING ${MEASUREMENT_FIELDS}`)
+        .get(...values, id) as MeasurementRow;
       this.touchSession(sessionId);
       return toMeasurement(row);
     });
@@ -420,10 +446,11 @@ export class CoinPingDb {
     });
   }
 
-  saveSoundResult(sessionId: number, input: SoundResultInput): SoundResult {
+  saveSoundResult(sessionId: number, input: SoundResultInput, audioInput?: SoundAudio): SoundResult {
     this.sessionRow(sessionId);
     requireObject(input, "Sound result");
-    const peaks = validPeaks(input.peaks);
+    const audio = audioInput === undefined ? undefined : validSoundAudio(audioInput);
+    const peaks = audio && Array.isArray(input.peaks) && input.peaks.length === 0 ? [] : validPeaks(input.peaks);
     if (input.matches !== undefined && !Array.isArray(input.matches)) {
       throw new ValidationError("Invalid sound matches.");
     }
@@ -444,9 +471,19 @@ export class CoinPingDb {
         VALUES (?, ?, ?, ?, ?, ?) RETURNING ${SOUND_FIELDS}`).get(sessionId, requiredText(input.label, "Sound result label"),
           JSON.stringify(peaks), matches ? JSON.stringify(matches) : null, optionalText(input.notes, "Notes", 10_000),
           new Date().toISOString()) as SoundResultRow;
+      if (audio) {
+        this.db.prepare("INSERT INTO sound_result_audio (sound_result_id, mime_type, data) VALUES (?, ?, ?)")
+          .run(row.id, audio.mimeType, audio.bytes);
+      }
       this.touchSession(sessionId);
-      return toSoundResult(row);
+      return toSoundResult(row, Boolean(audio));
     });
+  }
+
+  getSoundAudio(id: number): SoundAudio | null {
+    const row = this.db.prepare("SELECT mime_type AS mimeType, data AS bytes FROM sound_result_audio WHERE sound_result_id = ?")
+      .get(positiveId(id, "Sound result")) as SoundAudio | undefined;
+    return row ? { mimeType: row.mimeType, bytes: row.bytes } : null;
   }
 
   async backupTo(path: string): Promise<void> {
@@ -459,10 +496,11 @@ export class CoinPingDb {
     try {
       db.exec("PRAGMA trusted_schema = OFF;");
       const integrity = db.prepare("PRAGMA quick_check").all();
-      if (schemaVersion(db) !== CATALOG_SCHEMA_VERSION || integrity.length !== 1 || integrity[0].quick_check !== "ok") {
+      const version = schemaVersion(db);
+      if ((version !== 1 && version !== CATALOG_SCHEMA_VERSION) || integrity.length !== 1 || integrity[0].quick_check !== "ok") {
         throw new ValidationError("This file is not a supported catalog backup.");
       }
-      migrateCatalog(canonical);
+      migrateCatalog(canonical, version);
       // SQLite preserves the original SQL formatting when it adds coin_id to
       // a legacy table. Compare SQL tokens rather than whitespace around them.
       const sqlTokens = (sql: string) =>

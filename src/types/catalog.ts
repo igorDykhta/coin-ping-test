@@ -131,6 +131,12 @@ export type SoundResult = SoundResultInput & {
   id: number;
   sessionId: number;
   createdAt: string;
+  hasAudio?: boolean;
+};
+
+export type SoundAudio = {
+  mimeType: string;
+  bytes: Uint8Array;
 };
 
 export type SessionInput = {
@@ -172,9 +178,11 @@ export type CoinCatalogApi = {
   createSession: (coinId: number, input: SessionInput) => Promise<Session>;
   updateSession: (id: number, input: SessionInput) => Promise<Session>;
   createMeasurement: (sessionId: number, input: MeasurementInput) => Promise<Measurement>;
+  updateMeasurement: (sessionId: number, id: number, input: MeasurementInput) => Promise<Measurement>;
   createComparison: (sessionId: number, input: ComparisonInput) => Promise<ImageComparison>;
   updateComparison: (id: number, input: ComparisonInput) => Promise<ImageComparison>;
-  saveSoundResult: (sessionId: number, input: SoundResultInput) => Promise<SoundResult>;
+  saveSoundResult: (sessionId: number, input: SoundResultInput, audio?: SoundAudio) => Promise<SoundResult>;
+  getSoundAudio: (resultId: number) => Promise<SoundAudio | null>;
   exportBackup: () => Promise<boolean>;
   importBackup: () => Promise<boolean>;
 };

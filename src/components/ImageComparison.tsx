@@ -38,6 +38,7 @@ type Props = {
   importCandidate: (side: Face) => Promise<ComparisonPhoto | null>;
   onDeleteCandidate?: (id: number) => Promise<void>;
   onSave: (draft: ImageComparisonDraft) => Promise<void>;
+  saveAvailable?: boolean;
   initial?: ImageComparisonDraft | null;
   onOpenCoin?: () => void;
 };
@@ -235,6 +236,7 @@ export function ImageComparison({
   importCandidate,
   onDeleteCandidate,
   onSave,
+  saveAvailable = true,
   initial,
   onOpenCoin,
 }: Props) {
@@ -446,7 +448,7 @@ export function ImageComparison({
   }
 
   async function save() {
-    if (!reference || !draft.candidate) return;
+    if (!saveAvailable || !reference || !draft.candidate) return;
     setPending("save");
     setErrorMessage(null);
     try {
@@ -488,10 +490,12 @@ export function ImageComparison({
           <Button variant="outline" disabled={!!pending} onClick={() => void openCandidate()}>
             {pending === "import" ? "Opening…" : draft.candidate ? "Replace photo" : "Open photo"}
           </Button>
-          {reference && draft.candidate && (
+          {!saveAvailable ? (
+            <span className="coin-compare-save-status">Select or start a specimen session to save.</span>
+          ) : reference && draft.candidate ? (
             <span role="status" className="coin-compare-save-status">{draft.saved ? "Saved" : "Unsaved"}</span>
-          )}
-          <Button disabled={!reference || !draft.candidate || !!pending || draft.saved} onClick={() => void save()}>
+          ) : null}
+          <Button disabled={!saveAvailable || !reference || !draft.candidate || !!pending || draft.saved} onClick={() => void save()}>
             {pending === "save" ? "Saving…" : "Save comparison"}
           </Button>
         </div>

@@ -226,3 +226,68 @@ test("a removed measurement range prompts for an explicit selection before savin
     id: 10, input: { metric: "conductivity", value: 45, specificationId: null, method: "GoldScreenSensor", notes: undefined },
   }]);
 });
+
+test("the session checklist summarizes saved evidence and gives outside-range readings priority", () => {
+  const h = catalogHarness();
+  const { CoinTestHistory } = h.load("src/components/CoinTestHistory.tsx");
+  const session = { id: 10, label: "Specimen A", createdAt: "2026-10-31T10:00:00Z", comparisons: [], measurements: [], soundResults: [] };
+  const checklist = h.mount(CoinTestHistory, { coin: coin(1, { sessions: [session] }) })
+    .mountChild("SessionEntry").mountChild("SessionChecklist");
+  function states() {
+    return Object.fromEntries(checklist.all("li").map(({ props: { children: [label, badge] } }) => [
+      label.props.children, badge.props.children,
+    ]));
+  }
+  assert.deepEqual(states(), {
+    Weight: "Missing", Density: "Missing", "GoldScreenSensor conductivity": "Missing",
+    "Obverse comparison": "Missing", "Reverse comparison": "Missing", "Sound result": "Missing",
+  });
+  checklist.render({ session: {
+    ...session,
+    comparisons: [{ side: "obverse" }],
+    measurements: [
+      { metric: "weight", status: "within" }, { metric: "weight", status: "outside" },
+      { metric: "density", status: "not-assessed" }, { metric: "conductivity", status: "within" },
+    ],
+    soundResults: [{}],
+  } });
+  assert.deepEqual(states(), {
+    Weight: "Outside range", Density: "Not assessed", "GoldScreenSensor conductivity": "Within range",
+    "Obverse comparison": "Saved", "Reverse comparison": "Missing", "Sound result": "Saved",
+  });
+});
+
+test("editing a reading pre-fills its fields and submits the original saved range with the correction", async () => {
+  const submitted = [];
+  let changed = 0;
+  const h = catalogHarness({ updateMeasurement: async (...args) => submitted.push(args) });
+  const { CoinTestHistory } = h.load("src/components/CoinTestHistory.tsx");
+  const specification = { id: 3, metric: "weight", min: 31, max: 33 };
+  const measurement = {
+    id: 24, metric: "weight", value: 35, specification, method: "Bench scale", notes: "Uncertain first value",
+    measuredAt: "2026-10-31T10:00:00Z", status: "outside",
+  };
+  const history = h.mount(CoinTestHistory, {
+    coin: coin(1, { sessions: [{ id: 10, label: "Specimen A", createdAt: measurement.measuredAt, comparisons: [], measurements: [measurement], soundResults: [] }] }),
+    onChanged: async () => { changed += 1; },
+  });
+  const entry = history.mountChild("SessionEntry");
+  const reading = entry.mountChild("Reading");
+  reading.click("Edit reading");
+  entry.render();
+  assert.equal(entry.button("Add reading").disabled, true);
+  const form = entry.mountChild("MeasurementForm");
+  assert.equal(form.field("Reading (g)").value, "35");
+  assert.equal(form.field("Method or device").value, "Bench scale");
+  assert.equal(form.find("CatalogNotes").props.value, "Uncertain first value");
+  assert.ok(form.all("option").some(({ props }) => props.children === "Original range · 31–33 g"));
+  form.fill("Reading (g)", "32");
+  form.submit();
+  await flush();
+  entry.render();
+  assert.deepEqual(submitted, [[10, 24, {
+    metric: "weight", value: 32, specificationId: 3, method: "Bench scale", notes: "Uncertain first value",
+  }]]);
+  assert.equal(changed, 1);
+  assert.equal(entry.button("Add reading").disabled, false);
+});

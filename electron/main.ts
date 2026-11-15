@@ -96,9 +96,11 @@ function registerIpcHandlers(): void {
   handle("createSession", (id, input) => db.createSession(id, input));
   handle("updateSession", (id, input) => db.updateSession(id, input));
   handle("createMeasurement", (id, input) => db.createMeasurement(id, input));
+  handle("updateMeasurement", (sessionId, id, input) => db.updateMeasurement(sessionId, id, input));
   handle("createComparison", (id, input) => db.createComparison(id, input));
   handle("updateComparison", (id, input) => db.updateComparison(id, input));
-  handle("saveSoundResult", (id, input) => db.saveSoundResult(id, input));
+  handle("saveSoundResult", (id, input, audio) => db.saveSoundResult(id, input, audio));
+  handle("getSoundAudio", (id) => db.getSoundAudio(id), true);
 
   handle("importImage", (input) => writeFiles(async () => {
     const selection = await dialog.showOpenDialog({

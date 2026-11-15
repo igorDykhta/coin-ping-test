@@ -71,7 +71,8 @@ function renderer(win) {
       await until(`the ${label} field`, (text, next, selector) => {
         const labels = document.querySelector(selector)?.querySelectorAll("label") ?? [];
         const labelNode = [...labels].find((node) => node.textContent.trim() === text && node.getClientRects().length);
-        const control = labelNode?.control;
+        const control = labelNode?.control ?? [...(document.querySelector(selector)?.querySelectorAll("[aria-label]") ?? [])]
+          .find((node) => node.getAttribute("aria-label") === text && node.matches("input, select, textarea") && node.getClientRects().length);
         if (!control || control.matches(":disabled")) return false;
         const prototype = Object.getPrototypeOf(control);
         if (control instanceof HTMLSelectElement && ![...control.options].some((option) => option.value === next)) return false;
@@ -90,6 +91,25 @@ async function captureScreenshot(win, name) {
   if (!directory) return;
   fs.mkdirSync(directory, { recursive: true });
   fs.writeFileSync(path.join(directory, `${name}.png`), (await win.capturePage()).toPNG());
+}
+
+async function playSavedRecording(ui) {
+  await ui.until("the saved audio result", () => {
+    const summary = [...document.querySelectorAll("summary")].find((node) =>
+      node.textContent.trim().endsWith("· Recording") && node.getClientRects().length);
+    if (!summary) return false;
+    if (!summary.parentElement.open) summary.click();
+    return true;
+  });
+  const selector = 'audio[aria-label="Recorded ping"]';
+  await ui.until("the saved audio can be decoded", (audioSelector) => document.querySelector(audioSelector)?.readyState >= 1, selector);
+  await ui.call(async (audioSelector) => {
+    const audio = document.querySelector(audioSelector);
+    audio.muted = true;
+    await audio.play();
+  }, selector);
+  await ui.until("the recording plays", (audioSelector) => document.querySelector(audioSelector)?.currentTime > 0, selector);
+  await ui.call((audioSelector) => document.querySelector(audioSelector).pause(), selector);
 }
 
 async function workflows(win) {
@@ -115,17 +135,26 @@ async function workflows(win) {
   await ui.field("Maximum (MS/m)", "46");
   await ui.click("Save specification");
   await ui.text("44–46 MS/m");
-  await ui.click("New test session");
-  await ui.field("Sample or session name", "Bench test");
-  await ui.click("Create session");
-  await ui.text("Bench test");
+  await ui.click("Start new specimen test");
+  await ui.field("Specimen name", "Bench specimen A", '[role="dialog"]');
+  await ui.click("Create specimen session", '[role="dialog"]');
+  await ui.text("Bench specimen A");
+  await ui.until("the empty session checklist", () =>
+    [...document.querySelectorAll('[aria-label="Session checklist"] li')].filter((item) => item.textContent.includes("Missing")).length === 6);
   await ui.click("Add reading");
   await ui.field("Metric", "conductivity");
-  await ui.field("Reading (MS/m)", "45");
+  await ui.field("Reading (MS/m)", "47");
   const specId = await ui.call(async (id) => (await window.coinCatalogApi.getCoin(id)).specifications[0].id, coinId);
   await ui.field("Reference range", specId);
   await ui.click("Save reading");
-  await ui.text("Within range");
+  await ui.until("the checklist warns about the original reading", () =>
+    document.querySelector('[aria-label="Session checklist"]')?.textContent.includes("Outside range"));
+  const specimen = await ui.call(async (id) => (await window.coinCatalogApi.getCoin(id)).sessions[0], coinId);
+  await ui.click("Edit reading");
+  await ui.field("Reading (MS/m)", "45");
+  await ui.click("Save reading");
+  await ui.until("correcting the reading updates the checklist", () =>
+    document.querySelector('[aria-label="Session checklist"]')?.textContent.includes("Within range"));
 
   const photoPath = path.join(profile, "photo.png");
   const bitmap = Buffer.alloc(48 * 48 * 4, 230);
@@ -149,7 +178,7 @@ async function workflows(win) {
   await captureScreenshot(win, "coin-details");
 
   await ui.click("Compare photo");
-  await ui.text("Silver Crown · Bench test");
+  await ui.text("Silver Crown · Bench specimen A");
   fileChoices.push(null);
   await ui.click("Open photo");
   fileChoices.push(photoPath);
@@ -182,7 +211,7 @@ async function workflows(win) {
     label.textContent.trim() === "Rotation (°)" && label.control?.value === "17" && label.getClientRects().length));
 
   await ui.click("Sound analysis");
-  await ui.text("Silver Crown · Bench test");
+  await ui.text("Silver Crown · Bench specimen A");
   await ui.click("Start listening");
   await ui.until("live microphone data", () => document.body.innerText.includes("Audio sample rate"));
   await ui.until("the live spectrum visible at the minimum window size", () => {
@@ -233,6 +262,31 @@ async function workflows(win) {
   }, coinId);
   assert.deepEqual(manualPeak, { frequencyHz: 5500, kind: "long", source: "manual" });
 
+  await ui.click("Start new specimen test");
+  await ui.field("Specimen name", "Bench specimen B", '[role="dialog"]');
+  await ui.click("Create specimen session", '[role="dialog"]');
+  await ui.text("Silver Crown · Bench specimen B");
+  await ui.until("the first specimen's detected peaks do not carry over", () =>
+    !document.querySelector('[aria-label="Sound analysis"]').innerText.includes("5500 Hz"));
+  const secondSpecimenId = await ui.call(async (id) => (await window.coinCatalogApi.getCoin(id)).sessions
+    .find((session) => session.label === "Bench specimen B").id, coinId);
+  await ui.click("Enter a peak manually");
+  await ui.field("Peak frequency (Hz)", "6200", 'section[aria-label="Sound analysis"]');
+  await ui.click("Add peak", 'section[aria-label="Sound analysis"]');
+  await ui.click("Save test result");
+  await ui.text("Test result saved");
+  await ui.click("Image comparison");
+  await ui.text("Silver Crown · Bench specimen B");
+  await ui.until("the new specimen's candidate picker excludes the first specimen's photo", () => {
+    const label = [...document.querySelectorAll("label")].find((node) => node.querySelector("span")?.textContent === "Candidate photo");
+    return label?.control?.disabled && label.control.options.length === 1;
+  });
+  await ui.click("Sound analysis");
+  await ui.field("Specimen session", specimen.id);
+  await ui.text("Silver Crown · Bench specimen A");
+  await ui.until("switching back does not show the second specimen's peak", () =>
+    !document.querySelector('[aria-label="Sound analysis"]').innerText.includes("6200 Hz"));
+
   await ui.click("Catalog");
   await ui.field("Search coins", "Silv");
   await ui.field("Country", "United Kingdom");
@@ -245,6 +299,7 @@ async function workflows(win) {
   });
   await ui.text("Within range");
   await ui.text("Sound results");
+  await playSavedRecording(ui);
   await ui.click("Edit details");
   await ui.field("Country or issuer", "Canada");
   await ui.click("Save details");
@@ -260,9 +315,21 @@ async function workflows(win) {
     detail: await window.coinCatalogApi.getCoin(id),
     references: await window.coinPingApi.listReferences(),
   }), coinId);
-  assert.equal(beforeBackup.detail.sessions.length, 1);
-  assert.equal(beforeBackup.detail.sessions[0].measurements[0].status, "within");
-  assert.equal(beforeBackup.detail.sessions[0].soundResults.length, 2);
+  assert.equal(beforeBackup.detail.sessions.length, 2);
+  const first = beforeBackup.detail.sessions.find((session) => session.id === specimen.id);
+  const second = beforeBackup.detail.sessions.find((session) => session.id === secondSpecimenId);
+  assert.equal(first.measurements.length, 1);
+  assert.equal(first.measurements[0].id, specimen.measurements[0].id);
+  assert.equal(first.measurements[0].status, "within");
+  assert.equal(first.measurements[0].value, 45);
+  assert.equal(first.comparisons.length, 1);
+  assert.equal(first.soundResults.length, 2);
+  assert.equal(first.soundResults.filter((result) => result.hasAudio).length, 1);
+  assert.equal(second.measurements.length, 0);
+  assert.equal(second.comparisons.length, 0);
+  assert.equal(second.soundResults.length, 1);
+  assert.equal(second.soundResults[0].peaks[0].frequencyHz, 6200);
+  assert.equal(second.soundResults[0].hasAudio, false);
   assert.equal(beforeBackup.detail.references[0].label, "Bench sound reference");
   assert.ok(beforeBackup.detail.references[0].peaks.some((peak) => Math.abs(peak.frequencyHz - 400) < 75));
   assert.equal(beforeBackup.references.find((ref) => ref.id === 1).coinId, null);
@@ -281,9 +348,16 @@ async function workflows(win) {
   await ui.until("the restored catalog and name", () => document.body.innerText.includes("Silver Crown") &&
     document.body.innerText.includes("Coin catalog"));
   assert.deepEqual(await ui.call((id) => window.coinCatalogApi.getCoin(id), coinId), beforeBackup.detail);
-  assert.equal(fileChoices.length, 0);
   await captureScreenshot(win, "catalog");
-  console.log("Electron workflows passed: catalog editing and search, photos and comparison, synthetic sound and session history, backup and restore.");
+  await ui.until("the restored coin card", () => {
+    const card = document.querySelector('button[aria-label="Open Silver Crown"]');
+    if (!card?.getClientRects().length) return false;
+    card.click();
+    return true;
+  });
+  await playSavedRecording(ui);
+  assert.equal(fileChoices.length, 0);
+  console.log("Electron workflows passed: separate specimen tests, checklist and reading correction, photo alignment, saved audio playback, backup and restore.");
 }
 
 installFixtures();

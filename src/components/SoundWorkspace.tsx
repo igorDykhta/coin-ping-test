@@ -4,7 +4,7 @@ import { Button, Card, CardContent, CardHeader, CardTitle } from "@sqlrooms/ui";
 import { getReferenceColor } from "../lib/referenceColors";
 import type { ReferenceMatch } from "../lib/coinMatcher";
 import type { DetectedPing } from "../lib/pingDetector";
-import type { CoinSummary } from "../types/catalog";
+import type { CoinSummary, SoundAudio } from "../types/catalog";
 import type { ReferenceRecord } from "../types/coinPing";
 import { DetectedPingsList } from "./DetectedPingsList";
 import { LiveSpectrumPanel, type DetectedPingsExternalState, type SoundControls } from "./LiveSpectrumPanel";
@@ -26,7 +26,7 @@ type Props = {
   onOpenCoin: () => void;
   onChanged: () => void;
   onCreateCoin: (name: string) => Promise<number>;
-  onSaveResult: (ping: DetectedPing, matches: ReferenceMatch[]) => Promise<void>;
+  onSaveResult: (ping: DetectedPing, matches: ReferenceMatch[], audio?: SoundAudio) => Promise<void>;
   onSoundControlsChange: (controls: SoundControls) => void;
 };
 
@@ -140,6 +140,9 @@ export function SoundWorkspace({
           </select>
         </label>
         {coinId !== null ? <Button size="sm" variant="outline" onClick={onOpenCoin}>Coin details</Button> : null}
+        {coinId !== null && sessionId === undefined ? (
+          <p className="py-1 text-xs text-muted-foreground">Select or start a specimen session to save test results.</p>
+        ) : null}
       </div>
       {error ? <p role="alert" className="text-sm text-red-400">{error}</p> : null}
       <div className="grid min-h-[660px] flex-1 grid-cols-[minmax(250px,300px)_minmax(0,1fr)] gap-3 xl:min-h-[700px]">
@@ -174,8 +177,8 @@ export function SoundWorkspace({
                 onDismiss={pings.dismiss}
                 onReferenceSaved={onChanged}
                 onCreateCoin={onCreateCoin}
-                onSaveResult={coinId !== null ? onSaveResult : undefined}
-                resultDestination={coinId !== null ? `${coinId}:${sessionId ?? "automatic"}` : undefined}
+                onSaveResult={coinId !== null && sessionId !== undefined ? onSaveResult : undefined}
+                resultDestination={sessionId !== undefined ? String(sessionId) : undefined}
               />
             </CardContent>
           </Card>

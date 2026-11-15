@@ -165,6 +165,19 @@ test("saving reuses the selected candidate and submits aligned layers and photo 
   assert.equal(app.button("Save comparison").disabled, true);
 });
 
+test("a photo comparison can be previewed without a specimen but only saved to a session", async () => {
+  const app = comparisonHarness({ saveAvailable: false });
+  app.selectCandidate(candidate.id);
+  assert.equal(app.pane().photos.candidate.id, candidate.id);
+  assert.equal(app.button("Save comparison").disabled, true);
+  app.button("Save comparison").onClick();
+  await Promise.resolve();
+  assert.equal(app.drafts.length, 0);
+
+  app.render({ saveAvailable: true });
+  assert.equal(app.button("Save comparison").disabled, false);
+});
+
 test("a saved comparison keeps the reference used at save time when the primary changes", async () => {
   const replacement = { ...obverse, id: 4, name: "New primary", primary: false };
   const app = comparisonHarness({ referenceImages: [obverse, replacement, reverse] });

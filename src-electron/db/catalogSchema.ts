@@ -1,6 +1,7 @@
 import type { DatabaseSync } from "node:sqlite";
+import { MAX_SOUND_AUDIO_BYTES, SOUND_AUDIO_TYPES } from "./catalogValidation.js";
 
-export const CATALOG_SCHEMA_VERSION = 1;
+export const CATALOG_SCHEMA_VERSION = 2;
 
 const REFERENCE_SCHEMA = `
   CREATE TABLE IF NOT EXISTS reference_recordings (
@@ -107,24 +108,35 @@ const CATALOG_SCHEMA = `
   CREATE INDEX sound_session_idx ON sound_results(session_id);
 `;
 
+const SOUND_AUDIO_SCHEMA = `
+  CREATE TABLE sound_result_audio (
+    sound_result_id INTEGER PRIMARY KEY REFERENCES sound_results(id) ON DELETE CASCADE,
+    mime_type TEXT NOT NULL CHECK (mime_type IN (${SOUND_AUDIO_TYPES.map((type) => `'${type}'`).join(", ")})),
+    data BLOB NOT NULL CHECK (typeof(data) = 'blob' AND length(data) BETWEEN 1 AND ${MAX_SOUND_AUDIO_BYTES})
+  );
+`;
+
 export function schemaVersion(db: DatabaseSync): number {
   return Number(db.prepare("PRAGMA user_version").get()?.user_version);
 }
 
-export function migrateCatalog(db: DatabaseSync): void {
+export function migrateCatalog(db: DatabaseSync, targetVersion: 1 | 2 = CATALOG_SCHEMA_VERSION): void {
   const version = schemaVersion(db);
-  if (version > CATALOG_SCHEMA_VERSION) {
+  if (version > targetVersion) {
     throw new Error("This catalog was created by a newer version of Coin Ping Analyzer.");
   }
-  if (version === CATALOG_SCHEMA_VERSION) {
+  if (version === targetVersion) {
     return;
   }
 
   db.exec("BEGIN IMMEDIATE");
   try {
-    db.exec(REFERENCE_SCHEMA);
-    db.exec(CATALOG_SCHEMA);
-    db.exec(`PRAGMA user_version = ${CATALOG_SCHEMA_VERSION}`);
+    if (version < 1) {
+      db.exec(REFERENCE_SCHEMA);
+      db.exec(CATALOG_SCHEMA);
+    }
+    if (targetVersion >= 2) db.exec(SOUND_AUDIO_SCHEMA);
+    db.exec(`PRAGMA user_version = ${targetVersion}`);
     db.exec("COMMIT");
   } catch (error) {
     db.exec("ROLLBACK");

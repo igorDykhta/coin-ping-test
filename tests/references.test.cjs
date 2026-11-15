@@ -186,3 +186,25 @@ test("sound result save status tracks both the session and the peak set", async 
   assert.equal(resultButton(first, narrowed).disabled, true);
   assert.equal(resultButton(first, [...ping.peaks].reverse()).disabled, true);
 });
+
+test("a recording with no peaks can save its bytes to a session but cannot become a reference", async () => {
+  const runner = createHookRunner();
+  const { DetectedPingsList } = createLoader({ react: runner.react, "@sqlrooms/ui": { Button: "Button" } }, {
+    window: { coinPingApi: {} },
+  })("src/components/DetectedPingsList.tsx");
+  const clip = new Blob([new Uint8Array([1, 2, 3])], { type: "audio/webm;codecs=opus" });
+  const ping = { id: "quiet-take", detectedAt: "2026-01-01", peaks: [], audioClip: clip };
+  const save = [];
+  const list = runner.render(() => DetectedPingsList({
+    pings: [], enabled: false, manualRecording: ping,
+    onSaveResult: async (...args) => { save.push(args); },
+  }));
+  const item = findElement(list, (el) => el.type?.name === "DetectedPingItem");
+  const itemRunner = createHookRunner();
+  Object.assign(runner.react, itemRunner.react);
+  const rendered = itemRunner.render(() => item.type(item.props));
+  assert.equal(findElement(rendered, (el) => el.type === "Button" && el.props.children === "Save as reference…"), null);
+  findElement(rendered, (el) => el.type === "Button" && el.props.children === "Save test result").props.onClick();
+  await new Promise(setImmediate);
+  assert.deepEqual(save, [[ping, [], { mimeType: "audio/webm;codecs=opus", bytes: new Uint8Array([1, 2, 3]) }]]);
+});

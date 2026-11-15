@@ -45,10 +45,10 @@ The regression suite covers detector timing, microphone lifecycle, catalog migra
 
 ## Workspaces
 
-- **Catalog** has searchable coin cards and editable details. Add obverse and reverse reference photos, optional edge images, and weight, density, and GoldScreenSensor specifications. Add manual readings to test sessions to retain the range used for each assessment.
-- **Sound analysis** compares live or manually recorded pings against a selected coin or the entire reference library. Save peaks to the selected coin as a reference, or record a test result in its history. Existing references can be linked from **Unassigned references**.
+- **Catalog** has searchable coin cards and editable details. Add obverse, reverse, and optional edge reference photos, as well as weight, density, and GoldScreenSensor specifications. Start a specimen test for each physical coin. Its checklist tracks the three readings, both face comparisons, and sound results. Edit readings in the specimen's history to correct their values or reference ranges.
+- **Sound analysis** compares live or manually recorded pings against a selected coin or the entire reference library. Select a specimen session to save test results. Takes captured with **Record ping** include playable audio in the specimen's history. Save reference peaks separately at the coin variant level, or link existing peaks from **Unassigned references**.
 - **Image comparison** aligns a local JPEG or PNG with a reference for the same coin face. Position, rotate, and scale each layer, then save the comparison to reopen it from the coin's test history.
 
 ## Storage and backups
 
-On macOS the initial SQLite file is `~/Library/Application Support/coin-ping-test/coin-ping-test.sqlite`. Imported photos are copied into the app library. Use **Back up library** in the Catalog to export the database and photos together. **Restore backup** opens a copy of that folder as the active library and retains the previous library on disk. Saved sound references contain resonance peaks and metadata.
+On macOS the initial SQLite file is `~/Library/Application Support/coin-ping-test/coin-ping-test.sqlite`. The database includes saved audio, and imported photos are copied into the app library. Use **Back up library** in the Catalog to export the database and photos together. **Restore backup** opens a copy of that folder as the active library and retains the previous library on disk.
